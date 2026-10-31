@@ -31,7 +31,7 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 body {
-  font-family: "Zen Kaku Gothic New", "Yu Gothic", YuGothic, "Hiragino Sans", -apple-system, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", sans-serif;
   -webkit-font-smoothing: antialiased;
   font-size: 15px;
   line-height: 1.45;
