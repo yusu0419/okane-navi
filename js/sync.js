@@ -38,7 +38,7 @@ export function findNearDup(txs, t, used = new Set()) {
 
 // 通知の種類から口座を推測
 export function guessAccount(accounts, item) {
-  const types = item.source === 'smbc-bank' ? ['bank'] : ['card'];
+  const types = item.source === 'smbc-bank' ? ['bank'] : item.source === 'mf' ? ['bank', 'card', 'paypay', 'cash', 'securities', 'points'] : ['card'];
   const words = new Set();
   const add = (s) => norm(s).split(/[\/・()（）:：\-\s]+/).filter((w) => w.length >= 2).forEach((w) => words.add(w));
   add(item.key.split(':').slice(1).join(':'));
@@ -77,7 +77,9 @@ export async function fetchSync(s) {
   return j;
 }
 
-// 取得した通知をアプリの取引に変換。戻り値は追加する取引
+const PROV = new Set(['mail', 'shortcut', 'mf']);
+
+// 取得した通知をアプリの取引に変換。戻り値は { add: 追加する取引, update: お店の名前を補った既存の取引 }
 export function processSync(state, items) {
   const s = state.sync;
   const accById = (id) => state.accounts.find((a) => a.id === id);
@@ -95,6 +97,7 @@ export function processSync(state, items) {
   const existing = new Set(state.tx.map((t) => t.extId).filter(Boolean));
   const used = new Set();
   const add = [];
+  const update = new Map();
   const pending = [];
   const seen = new Set();
   for (const it of [...s.pending, ...items.filter((i) => i.type === 'tx')]) {
@@ -112,14 +115,34 @@ export function processSync(state, items) {
     if (!acc) { pending.push(it); continue; }
     const t = {
       id: uid(), accountId: acc.id, date: it.date, time: it.time || '', amount: it.amount,
-      payee: it.payee || '', content: '', memo: '', source: it.source === 'applepay' ? 'shortcut' : 'mail', extId,
+      payee: it.payee || '', content: '', memo: '',
+      source: it.source === 'applepay' ? 'shortcut' : it.source === 'mf' ? 'mf' : 'mail', extId,
     };
     const dup = findNearDup([...state.tx, ...add], t, used);
-    if (dup) { used.add(dup.id); continue; }
+    if (dup) {
+      used.add(dup.id);
+      // 同じ取引が別経路で入っていて、お店の名前が無ければ補う
+      if (t.payee && !dup.payee && PROV.has(dup.source)) {
+        const u = { ...dup, payee: t.payee, time: dup.time || t.time };
+        if (!dup.userSet && dup.kind !== 'transfer') { u.kind = null; u.category = null; categorize(u, state.rules, acc.type, dup.kind); }
+        update.set(u.id, u);
+        const i = add.indexOf(dup);
+        if (i >= 0) add[i] = u;
+      }
+      continue;
+    }
     categorize(t, state.rules, acc.type);
+    if (it.transfer) { t.kind = 'transfer'; t.category = '口座間移動'; }
+    else if (t.kind === 'income' && !t.payee && acc.type === 'bank') {
+      // 金額だけの入金：給料日付近で給料に近い額なら給与とみなす
+      const p = state.plan || {};
+      const near = Math.abs(Number(t.date.slice(8)) - (p.payday || 25)) <= 3;
+      if (near && p.salary && t.amount >= p.salary * 0.7) t.category = '給与';
+    }
     add.push(t);
     existing.add(extId);
   }
   s.pending = pending.slice(-500);
-  return add;
+  for (const id of update.keys()) if (add.some((x) => x.id === id)) update.delete(id);
+  return { add, update: [...update.values()] };
 }

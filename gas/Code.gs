@@ -14,7 +14,7 @@ const SHORTCUT_PREFIX = 'sc_';
 const KEEP_DAYS = 120;
 
 // 読み取る送信元
-const QUERY = '(from:statement@vpass.ne.jp OR from:mail@qa.jcb.co.jp OR from:smbc_service@dn.smbc.co.jp)';
+const QUERY = '(from:statement@vpass.ne.jp OR from:mail@qa.jcb.co.jp OR from:smbc_service@dn.smbc.co.jp OR from:feedback@moneyforward.com)';
 
 // ---------- 最初に1回だけ実行 ----------
 
@@ -81,7 +81,8 @@ function collect_(since) {
       for (const m of th.getMessages()) {
         const date = Utilities.formatDate(m.getDate(), TZ, 'yyyy-MM-dd');
         if (date < since) continue;
-        const parsed = parseMessage_(m.getFrom(), m.getSubject(), m.getPlainBody(), m.getDate(), m.getId());
+        const isMf = m.getFrom().toLowerCase().indexOf('moneyforward.com') >= 0;
+        const parsed = parseMessage_(m.getFrom(), m.getSubject(), m.getPlainBody(), m.getDate(), m.getId(), isMf ? m.getBody() : '');
         if (parsed === null) continue; // 対象外のメール
         if (!parsed.length) unparsed.push({ date: date, from: m.getFrom(), subject: m.getSubject() });
         items.push.apply(items, parsed);
@@ -103,7 +104,7 @@ function collect_(since) {
 // ---------- メールの読み取り ----------
 // 戻り値: null = 対象外のメール / [] = 対象だが読み取れなかった / [item...]
 
-function parseMessage_(from, subject, body, dateObj, msgId) {
+function parseMessage_(from, subject, body, dateObj, msgId, html) {
   from = String(from || '').toLowerCase();
   subject = norm_(subject);
   const text = norm_(body);
@@ -178,10 +179,42 @@ function parseMessage_(from, subject, body, dateObj, msgId) {
     }
     return null;
   }
+  // マネーフォワード ME のアラートメール（つないでいる全口座の入出金。お店の名前は無し）
+  if (from.indexOf('moneyforward.com') >= 0) {
+    const isOut = subject.indexOf('出金のお知らせ') >= 0;
+    const isIn = subject.indexOf('入金のお知らせ') >= 0;
+    if (!isOut && !isIn) return null;
+    const t = htmlText_(html || body);
+    const out = [];
+    const re = /金融機関\s+(.+?)\s*\n\s*(?:出金|入金)日\s+(\d{4}年\d{1,2}月\d{1,2}日)\s*\n\s*(?:出金|入金)額\s+([\d,]+)\s*円\s*(\(振替\))?/g;
+    let m, n = 0;
+    while ((m = re.exec(t))) {
+      const inst = m[1].trim();
+      const v = parseYen_(m[3]);
+      out.push({
+        id: 'mf-' + msgId + '-' + n++, type: 'tx', source: 'mf',
+        key: 'mf:' + inst, label: inst + '（マネーフォワード経由）',
+        date: jpDate_(m[2]), time: '', amount: isOut ? -v : v, payee: '', transfer: !!m[4],
+      });
+    }
+    return out;
+  }
   return null;
 }
 
 // ---------- 小物 ----------
+
+// HTML の表を「見出し 値」の行のテキストにする
+function htmlText_(html) {
+  return norm_(String(html || '')
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, '')
+    .replace(/<\/t[dh]>\s*<t[dh][^>]*>/gi, ' ')
+    .replace(/<\/tr>|<br\s*\/?>|<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c))))
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n');
+}
 
 function norm_(s) {
   return String(s == null ? '' : s).normalize('NFKC').replace(/\r/g, '').replace(/[ \t　]+$/gm, '').trim();

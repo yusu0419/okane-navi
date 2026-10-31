@@ -59,3 +59,19 @@ test('三井住友銀行 口座出金・引落予定・振込入金', () => {
   assert.equal(n[0].type, 'notice');
   assert.equal(n[0].date, '2026-10-19');
 });
+
+test('マネーフォワードのアラートメール', () => {
+  const row = (k, v) => `<tr><td width="100" bgcolor="#f9f6f0" style="font-weight: bold;">${k}</td><td style="padding:10px;">${v}</td></tr>`;
+  const tbl = (a, d, v) => `<table width="500">${row('金融機関', a)}${row('出金日', d)}${row('出金額', v)}</table>\r\n`;
+  const html = `<html><body><p>アラートメール（出金のお知らせ）</p><p>設定金額（10,000円）以上の出金がありました。<br>詳細は</p>
+    <table><tr><td align="center">${tbl('三井住友銀行', '2026年10月27日', '12,345円')}${tbl('セゾンカード(AMEX GOLD)', '2026年10月26日', '20,000円（振替）')}</td></tr></table></body></html>`;
+  const r = JSON.parse(JSON.stringify(ctx.parseMessage_('feedback@moneyforward.com', '【Money Forward ME】出金のお知らせ', 'HTMLメールをご覧ください', new Date(), 'X', html)));
+  assert.deepEqual(r.map((x) => [x.key, x.date, x.amount, x.transfer, x.payee]), [
+    ['mf:三井住友銀行', '2026-10-27', -12345, false, ''],
+    ['mf:セゾンカード(AMEX GOLD)', '2026-10-26', -20000, true, ''],
+  ]);
+  const inHtml = html.replace(/出金/g, '入金');
+  const r2 = JSON.parse(JSON.stringify(ctx.parseMessage_('feedback@moneyforward.com', '【Money Forward ME】入金のお知らせ', '', new Date(), 'Y', inHtml)));
+  assert.equal(r2[0].amount, 12345);
+  assert.equal(ctx.parseMessage_('feedback@moneyforward.com', '【Money Forward ME】セゾンカード(AMEX GOLD) 引き落としのお知らせ（2026年11月）', '', new Date(), 'Z', ''), null);
+});

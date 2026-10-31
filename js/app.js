@@ -7,9 +7,10 @@ import {
   investSummary, monthTx, summarize, monthlySeries, averageMonthly, detectRecurring, monthOutlook, simulate,
 } from './finance.js';
 import { donut, incomeExpenseBars, lines, legend } from './charts.js';
-import { uid, yen, man, today, thisMonth, addMonths, ymLabel, esc, norm, sum, groupBy, parseAmount, daysInMonth, pad } from './util.js';
+import { toISO as toISODate, uid, yen, man, today, thisMonth, addMonths, ymLabel, esc, norm, sum, groupBy, parseAmount, daysInMonth, pad } from './util.js';
 import { loadSample } from './sample.js';
-import { fetchSync, processSync, findNearDup, guessAccount } from './sync.js';
+import { fetchSync, processSync, guessAccount } from './sync.js';
+import { reconcile, isProvisional } from './reconcile.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -85,7 +86,7 @@ function txRow(t) {
     <span class="dot" style="background:${catColor(t.category)}"></span>
     <div class="tx-main">
       <div class="tx-payee">${esc(t.payee || t.content || '(内容なし)')}</div>
-      <div class="tx-sub"><span class="chip">${esc(t.category || '未分類')}</span>${esc(a?.name || '')}${t.memo ? ' · ' + esc(t.memo) : ''}</div>
+      <div class="tx-sub"><span class="chip">${esc(t.category || '未分類')}</span>${t.review ? '<span class="chip warn">要確認</span>' : isProvisional(t) ? '<span class="chip prov">速報</span>' : ''}${esc(a?.name || '')}${t.memo ? ' · ' + esc(t.memo) : ''}</div>
     </div>
     <div class="${amountClass(t)}">${yen(t.amount, { sign: true })}</div>
   </li>`;
@@ -131,6 +132,11 @@ function viewHome() {
   if (sy.lastResult?.error) alerts.push(`<button class="alert warn" data-act="goto-sync">自動連携でエラー：${esc(sy.lastResult.error)} →</button>`);
   if (sy.pending.length) alerts.push(`<button class="alert" data-act="goto-sync">自動連携：口座が決まっていない取引が <b>${sy.pending.length}件</b> あります →</button>`);
   for (const n of sy.notices) alerts.push(`<div class="alert row-between"><button class="link-plain" data-act="notice" data-id="${esc(n.id)}">${esc(n.label)}：${Number(n.date.slice(5, 7))}/${Number(n.date.slice(8))} ${esc(n.text)}。<b>金額を記録 →</b></button><button class="icon-btn" data-act="notice-dismiss" data-id="${esc(n.id)}" aria-label="閉じる">×</button></div>`);
+  const rev = state.tx.filter((t) => t.review && !t.excluded).length;
+  if (rev) alerts.push(`<button class="alert warn" data-act="goto-review">明細CSVに見当たらない速報が <b>${rev}件</b> あります（取消の可能性）→</button>`);
+  const staleLimit = (() => { const d = new Date(); d.setDate(d.getDate() - 40); return toISODate(d); })();
+  const stale = [...groupBy(state.tx.filter((t) => isProvisional(t) && !t.review && t.date < staleLimit), (t) => t.accountId).entries()];
+  if (stale.length) alerts.push(`<button class="alert" data-act="import">${stale.map(([id, l]) => `${esc(accById(id)?.name || '')} ${l.length}件`).join('、')} が速報のままです。明細CSVを取り込むとお店の名前と金額が確定します →</button>`);
   if (unc) alerts.push(`<button class="alert" data-act="goto-uncategorized">未分類の取引が <b>${unc}件</b> あります →</button>`);
   for (const s of expiringPoints()) alerts.push(`<div class="alert warn">${esc(s.acc.name)}：${Math.round(s.value).toLocaleString()}${esc(unitOf(s.acc))} が ${s.expiry} に失効予定</div>`);
   const lastBackup = state.meta.lastBackup;
@@ -202,7 +208,8 @@ function accountGroups() {
       <ul class="simple">${accs.map((a) => {
         const v = balanceAt(state, a, now);
         const sub = a.type === 'points' ? `<small class="muted">≈${yen(toYen(a, v))}</small>` : a.type === 'card' ? '<small class="muted">未払い</small>' : '';
-        return `<li data-act="account" data-id="${a.id}" class="tap"><span>${esc(a.name)}</span><span class="right"><b class="${v < 0 ? 'minus' : ''}">${fmtUnit(a, v)}</b>${sub}</span></li>`;
+        const conf = a.confirmedThrough ? `<small class="muted">明細確定 ${Number(a.confirmedThrough.slice(5, 7))}/${Number(a.confirmedThrough.slice(8))}まで</small>` : '';
+        return `<li data-act="account" data-id="${a.id}" class="tap"><span class="right left">${esc(a.name)}${conf}</span><span class="right"><b class="${v < 0 ? 'minus' : ''}">${fmtUnit(a, v)}</b>${sub}</span></li>`;
       }).join('')}</ul></div>`;
   }).join('');
 }
@@ -254,10 +261,11 @@ function filteredTx() {
   const f = ui.txFilter;
   const q = norm(f.q);
   return state.tx.filter((t) => {
-    if (!q && !f.uncategorized && !t.date.startsWith(ui.ym)) return false;
+    if (!q && !f.uncategorized && !f.review && !t.date.startsWith(ui.ym)) return false;
     if (f.account && t.accountId !== f.account) return false;
     if (f.category && t.category !== f.category) return false;
     if (f.uncategorized && t.category !== '未分類') return false;
+    if (f.review && !t.review) return false;
     if (q && !norm([t.payee, t.content, t.memo, t.category].join(' ')).includes(q)) return false;
     return true;
   }).sort((a, b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')));
@@ -274,7 +282,7 @@ function viewTx() {
     <button class="btn primary small" data-act="import">取り込み</button>
     <button class="btn small" data-act="new-tx">＋手入力</button>
   </div>
-  ${f.q || f.uncategorized ? `<div class="muted center">全期間から検索中</div>` : monthNav('ym')}
+  ${f.q || f.uncategorized || f.review ? `<div class="muted center">全期間から検索中${f.review ? '（要確認のみ）<button class="link" data-act="clear-review">解除</button>' : ''}</div>` : monthNav('ym')}
   <div class="filters">
     <input type="search" id="q" placeholder="お店・メモで検索" value="${esc(f.q)}">
     <select id="f-acc"><option value="">すべての口座</option>${state.accounts.map((a) => `<option value="${a.id}" ${f.account === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
@@ -314,6 +322,7 @@ function editTx(t, preset = null, onSaved = null) {
     <label>口座<select id="acc">${state.accounts.map((a) => `<option value="${a.id}" ${a.id === t.accountId ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
     <label>お店・内容<input id="payee" value="${esc(t.payee)}"></label>
     <label>メモ<input id="memo" value="${esc(t.memo || '')}"></label>
+    ${t.review ? '<div class="notice warn">メール通知などで記録されましたが、その後取り込んだ明細CSVに見当たりません。取消・金額変更の可能性があります。問題なければ保存、不要なら削除してください。</div>' : isProvisional(t) ? '<div class="muted">速報（メール通知など）で記録された取引です。明細CSVを取り込むと確定します。</div>' : ''}
     ${t.content && t.content !== t.payee ? `<div class="muted">明細の内容：${esc(t.content)}${t.method ? ' / ' + esc(t.method) : ''}</div>` : ''}
     <label class="check"><input type="checkbox" id="excl" ${t.excluded ? 'checked' : ''}> 集計から除外する（重複など）</label>
     ${!isNew ? `<label class="check"><input type="checkbox" id="learn" checked> 同じお店の取引にも適用し、次回から自動分類する</label>` : ''}
@@ -353,6 +362,7 @@ function editTx(t, preset = null, onSaved = null) {
       t.payee = $('#payee', b).value.trim();
       t.memo = $('#memo', b).value.trim();
       t.excluded = $('#excl', b).checked;
+      t.review = false;
       const catChanged = t.category !== orig.category || t.kind !== orig.kind;
       if (catChanged) t.userSet = true;
       const updates = [t];
@@ -385,7 +395,8 @@ function importSheet(presetAccountId) {
   if (!accs.length) { toast('先に口座を追加してください'); return addAccount(); }
   const html = `<div class="form">
     <label>取り込み先の口座<select id="imp-acc">${accs.map((a) => `<option value="${a.id}" ${a.id === presetAccountId ? 'selected' : ''}>${ACCOUNT_TYPES[a.type].icon} ${esc(a.name)}</option>`).join('')}</select></label>
-    <label class="file-btn btn primary">CSVファイルを選ぶ<input type="file" id="imp-file" accept=".csv,.txt,.tsv,text/csv,text/plain" hidden></label>
+    <label class="file-btn btn primary">CSVファイルを選ぶ（複数可）<input type="file" id="imp-file" accept=".csv,.txt,.tsv,text/csv,text/plain" multiple hidden></label>
+    <p class="muted">複数のファイルを一度に選ぶと、どの口座の明細かを自動で判断してまとめて取り込みます。</p>
     <div id="imp-body"></div>
     <details class="help"><summary>明細CSVのダウンロード方法</summary>
       <p><b>PayPay</b>：PayPayアプリ → 「アカウント」→「取引履歴」→ 右上の「⋯」または「ダウンロード」→ 期間を選んでCSVを保存（「ファイル」アプリに保存）。</p>
@@ -393,11 +404,14 @@ function importSheet(presetAccountId) {
       <p><b>カード</b>：カード会社の会員サイト → 「ご利用明細」→「CSVダウンロード」。</p>
       <p><b>証券</b>：評価額は口座画面の「評価額を記録」で入力します（積立は銀行明細の振替として自動判定）。</p>
       <p>同じファイルを2回取り込んでも、重複分は自動でスキップされます。</p>
+      <p>メール通知などで入った「速報」の取引は、明細CSVを取り込むとお店の名前・確定金額で置き換わります（手で直した分類は残ります）。</p>
     </details>
   </div>`;
   openSheet('明細の取り込み', html, (b) => {
     $('#imp-file', b).onchange = async (e) => {
-      const file = e.target.files[0];
+      const files = [...e.target.files];
+      if (files.length > 1) return batchImportUI(b, files);
+      const file = files[0];
       if (!file) return;
       const text = decode(await file.arrayBuffer());
       const rows = parseCSV(text);
@@ -425,38 +439,39 @@ function prepare(list, acc) {
 }
 
 function importSummary(list) {
-  const existing = new Set(state.tx.map((t) => t.extId).filter(Boolean));
-  const used = new Set();
-  const auto = state.tx.filter((t) => t.source === 'mail' || t.source === 'shortcut');
-  // 自動連携で入っている取引と同じものは重複として扱う
-  const fresh = list.filter((t) => {
-    if (existing.has(t.extId)) return false;
-    const d = findNearDup(auto, t, used);
-    if (d) { used.add(d.id); return false; }
-    return true;
-  });
-  const dates = list.map((t) => t.date).sort();
-  return { fresh, dup: list.length - fresh.length, from: dates[0], to: dates[dates.length - 1] };
+  return reconcile(state.tx, list);
 }
+
+function summaryHtml(r) {
+  const parts = [`新規 <b>${r.fresh.length}件</b>`];
+  if (r.confirm.length) parts.push(`速報を確定 <b>${r.confirm.length}件</b>`);
+  if (r.dup) parts.push(`取り込み済み ${r.dup}件（スキップ）`);
+  if (r.review.length) parts.push(`<span class="minus">明細に無い速報 ${r.review.length}件（要確認にします）</span>`);
+  return `<div class="notice">${parts.join('／')}${r.from ? `<br>${r.from} 〜 ${r.to}` : ''}</div>`;
+}
+
+const importCount = (r) => r.fresh.length + r.confirm.length;
 
 function previewTable(list) {
   return `<ul class="tx-list preview">${list.slice(0, 6).map((t) => `<li class="tx"><div class="tx-main"><div class="tx-payee">${esc(t.payee || '')}</div><div class="tx-sub">${t.date} <span class="chip">${esc(t.category || '')}</span></div></div><div class="${amountClass(t)}">${yen(t.amount, { sign: true })}</div></li>`).join('')}</ul>`;
 }
 
-async function commitImport(list, accIds) {
-  const s = importSummary(list);
-  await putTx(s.fresh);
-  for (const id of accIds) {
-    const a = accById(id);
-    if (a) a.lastImport = today();
+async function commitImport(list) {
+  const r = importSummary(list);
+  await putTx([...r.fresh, ...r.confirm, ...r.review]);
+  for (const t of list) {
+    const a = accById(t.accountId);
+    if (!a) continue;
+    a.lastImport = today();
+    if (!a.confirmedThrough || t.date > a.confirmedThrough) a.confirmedThrough = t.date;
   }
   await saveKV('accounts');
-  const unc = s.fresh.filter((t) => t.category === '未分類').length;
+  const unc = [...r.fresh, ...r.confirm].filter((t) => t.category === '未分類').length;
   closeSheet();
   ui.tab = 'tx';
-  if (s.to) ui.ym = s.to.slice(0, 7);
+  if (r.to) ui.ym = r.to.slice(0, 7);
   render();
-  toast(`${s.fresh.length}件を取り込みました${s.dup ? `（重複${s.dup}件はスキップ）` : ''}${unc ? `。未分類${unc}件` : ''}`);
+  toast(`新規${r.fresh.length}件・確定${r.confirm.length}件${r.dup ? `（取り込み済み${r.dup}件はスキップ）` : ''}${r.review.length ? `。要確認${r.review.length}件` : ''}${unc ? `。未分類${unc}件` : ''}`);
 }
 
 function importPayPayUI(b, acc, rows) {
@@ -491,10 +506,10 @@ function importPayPayUI(b, acc, rows) {
   const refresh = () => {
     const list = build();
     const s = importSummary(list);
-    $('#pp-sum', body).innerHTML = `<div class="notice">新規 <b>${s.fresh.length}件</b>${s.dup ? `／重複 ${s.dup}件（スキップ）` : ''}<br>${s.from || ''} 〜 ${s.to || ''}</div>
-      ${previewTable(s.fresh)}
-      <button class="btn primary" id="pp-go" ${s.fresh.length ? '' : 'disabled'}>${s.fresh.length}件を取り込む</button>`;
-    $('#pp-go', body).onclick = () => commitImport(list, [acc.id]);
+    $('#pp-sum', body).innerHTML = `${summaryHtml(s)}
+      ${previewTable([...s.fresh, ...s.confirm])}
+      <button class="btn primary" id="pp-go" ${importCount(s) ? '' : 'disabled'}>${importCount(s)}件を取り込む</button>`;
+    $('#pp-go', body).onclick = () => commitImport(list);
   };
   body.onchange = refresh;
   refresh();
@@ -533,16 +548,78 @@ function importGenericUI(b, acc, rows, fileName) {
     read();
     const list = prepare(assignExtIds(parseGeneric(rows, m), acc.id), acc);
     const s = importSummary(list);
-    $('#g-sum', body).innerHTML = `<div class="notice">新規 <b>${s.fresh.length}件</b>${s.dup ? `／重複 ${s.dup}件（スキップ）` : ''}${s.from ? `<br>${s.from} 〜 ${s.to}` : ''}</div>
-      ${previewTable(s.fresh)}
+    $('#g-sum', body).innerHTML = `${summaryHtml(s)}
+      ${previewTable([...s.fresh, ...s.confirm])}
       <p class="muted">プラス（緑）が入金、マイナスが出金になっていればOKです。</p>
-      <button class="btn primary" id="g-go" ${s.fresh.length ? '' : 'disabled'}>${s.fresh.length}件を取り込む</button>`;
+      <button class="btn primary" id="g-go" ${importCount(s) ? '' : 'disabled'}>${importCount(s)}件を取り込む</button>`;
     $('#g-go', body).onclick = async () => {
       acc.importMapping = { sig, m: { ...m } };
-      await commitImport(list, [acc.id]);
+      await commitImport(list);
     };
   };
   body.onchange = refresh;
+  refresh();
+}
+
+function buildImportList(acc, rows, kind, sig) {
+  if (kind === 'paypay') {
+    // カード払いはカード明細側で取り込むので除外、ポイント払いはPayPay口座の支出として扱う
+    const list = parsePayPay(rows).filter((t) => t.bucket !== 'card').map((t) => ({ ...t, accountId: acc.id }));
+    return prepare(assignExtIds(list, acc.id), acc);
+  }
+  const m = acc.importMapping?.sig === sig ? acc.importMapping.m : guessMapping(rows, acc.type).mapping;
+  return prepare(assignExtIds(parseGeneric(rows, m), acc.id), acc);
+}
+
+async function batchImportUI(b, files) {
+  const body = $('#imp-body', b);
+  body.innerHTML = '<div class="notice">読み込み中…</div>';
+  const entries = [];
+  for (const f of files) {
+    const rows = parseCSV(decode(await f.arrayBuffer()));
+    if (!rows.length) { entries.push({ name: f.name, error: '読み込めませんでした' }); continue; }
+    const pp = isPayPay(rows[findHeaderRow(rows)] || []);
+    const sig = pp ? 'paypay' : guessMapping(rows).header.join('|');
+    const acc = pp
+      ? activeAccounts().find((a) => a.type === 'paypay')
+      : activeAccounts().find((a) => a.importMapping?.sig === sig);
+    entries.push({ name: f.name, rows, kind: pp ? 'paypay' : 'generic', sig, accId: acc?.id || '', auto: !!acc });
+  }
+  const accSelect = (e, i) => `<select data-i="${i}"><option value="">（口座を選ぶ）</option><option value="skip" ${e.accId === 'skip' ? 'selected' : ''}>取り込まない</option>${activeAccounts().filter((a) => !isValuationType(a.type) || a.type === 'securities').map((a) => `<option value="${a.id}" ${a.id === e.accId ? 'selected' : ''}>${ACCOUNT_TYPES[a.type].icon} ${esc(a.name)}</option>`).join('')}</select>`;
+  const refresh = () => {
+    const all = [];
+    const lines = entries.map((e, i) => {
+      if (e.error) return `<li><span>${esc(e.name)}</span><small class="minus">${e.error}</small></li>`;
+      let info = '';
+      const acc = accById(e.accId);
+      if (acc) {
+        e.list = buildImportList(acc, e.rows, e.kind, e.sig);
+        all.push(...e.list);
+        info = `${e.list.length}行${e.auto ? '・自動判定' : ''}`;
+      } else e.list = [];
+      return `<li class="batch-row"><div><div>${esc(e.name)}</div><small class="muted">${e.kind === 'paypay' ? 'PayPay ' : ''}${info}</small></div>${accSelect(e, i)}</li>`;
+    });
+    const r = importSummary(all);
+    const missing = entries.filter((e) => !e.error && !e.accId).length;
+    body.innerHTML = `<ul class="simple batch">${lines.join('')}</ul>
+      ${missing ? `<div class="notice warn">${missing}個のファイルの口座を選んでください（次回からは自動で判定します）</div>` : ''}
+      ${summaryHtml(r)}
+      <button class="btn primary" id="b-go" ${importCount(r) ? '' : 'disabled'}>${importCount(r)}件を取り込む</button>`;
+    $('#b-go', body).onclick = async () => {
+      for (const e of entries) {
+        const acc = accById(e.accId);
+        if (acc && e.kind === 'generic' && acc.importMapping?.sig !== e.sig) acc.importMapping = { sig: e.sig, m: guessMapping(e.rows, acc.type).mapping };
+      }
+      await commitImport(all);
+    };
+  };
+  body.onchange = (ev) => {
+    const i = ev.target.dataset.i;
+    if (i == null) return;
+    entries[i].accId = ev.target.value;
+    entries[i].auto = false;
+    refresh();
+  };
   refresh();
 }
 
@@ -1109,8 +1186,8 @@ async function runSync({ silent = false } = {}) {
   syncing = true;
   try {
     const j = await fetchSync(s);
-    const add = processSync(state, j.items || []);
-    if (add.length) await putTx(add);
+    const { add, update } = processSync(state, j.items || []);
+    if (add.length || update.length) await putTx([...add, ...update]);
     s.unparsed = (j.unparsed || []).slice(-20);
     s.lastSync = new Date().toISOString();
     s.lastResult = { ok: true, added: add.length, at: s.lastSync };
@@ -1131,7 +1208,7 @@ function syncSection() {
   const s = state.sync;
   const keys = Object.entries(s.keys).sort((a, b) => a[1].label.localeCompare(b[1].label));
   const accOpts = (sel, src) => {
-    const types = src === 'smbc-bank' ? ['bank'] : ['card', 'paypay', 'bank', 'cash'];
+    const types = src === 'smbc-bank' ? ['bank'] : src === 'mf' ? ['bank', 'card', 'paypay', 'cash', 'securities', 'points'] : ['card', 'paypay', 'bank', 'cash'];
     return `<option value="">（未設定）</option><option value="skip" ${sel === 'skip' ? 'selected' : ''}>取り込まない</option>` +
       activeAccounts().filter((a) => types.includes(a.type)).map((a) => `<option value="${a.id}" ${sel === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
   };
@@ -1159,7 +1236,8 @@ function syncSection() {
         <li>右上「デプロイ」→「新しいデプロイ」→ 種類の⚙で「ウェブアプリ」→ 次のユーザーとして実行：<b>自分</b>、アクセスできるユーザー：<b>全員</b> →「デプロイ」</li>
         <li>表示された「ウェブアプリのURL」をコピーして、上の「連携URL」に貼り付け →「保存して同期」</li>
       </ol>
-      <p>読み取れるメール：三井住友カード（Olive・Amazonマスター等）と ANA JCBカードの「ご利用のお知らせ」、三井住友銀行の「口座出金」「引き落としの事前お知らせ」「振込入金」。<br>
+      <p>読み取れるメール：三井住友カード（Olive・Amazonマスター等）と ANA JCBカードの「ご利用のお知らせ」、三井住友銀行の「口座出金」「引き落としの事前お知らせ」「振込入金」、マネーフォワード MEの「出金のお知らせ」「入金のお知らせ」。<br>
+      ・マネーフォワード MEのアラートは、Web版の「設定 → メール」で出金・入金の通知を「受け取る」にし、金額をできるだけ小さく（例：1円）すると、つないでいる全口座の入出金が届きます（お店の名前は入りません）。<br>
       ・三井住友銀行の振込入金メールには金額が書かれていないため、ホームに「金額を記録」のお知らせを出します。<br>
       ・携帯料金・公共料金など毎月の自動払いは、カード会社が通知メールを送らないことがあります。月1回カード明細CSVを取り込むと確実です（重複は自動でスキップ）。<br>
       ・セゾン・PayPay・ゆうちょ・SBIは利用ごとのメールが届かないため、CSV取り込みかショートカットを使ってください。</p>
@@ -1200,8 +1278,8 @@ function mountSync(v) {
     const k = e.target.dataset.key;
     if (!k) return;
     if (e.target.value) s.map[k] = e.target.value; else delete s.map[k];
-    const add = processSync(state, []);
-    if (add.length) await putTx(add);
+    const { add, update } = processSync(state, []);
+    if (add.length || update.length) await putTx([...add, ...update]);
     await saveKV('sync');
     render();
     if (add.length) toast(`${add.length}件を取り込みました`);
@@ -1267,6 +1345,8 @@ document.addEventListener('click', async (e) => {
     case 'notice': openNotice(el.dataset.id); break;
     case 'notice-dismiss': await dismissNotice(el.dataset.id); render(); break;
     case 'goto-uncategorized': ui.tab = 'tx'; ui.txFilter = { q: '', account: '', category: '', uncategorized: true }; render(); break;
+    case 'goto-review': ui.tab = 'tx'; ui.txFilter = { q: '', account: '', category: '', uncategorized: false, review: true }; render(); break;
+    case 'clear-review': ui.txFilter.review = false; render(); break;
     case 'sample':
       if (state.tx.length && !confirm('今のデータにサンプルを追加します。よろしいですか？')) return;
       await loadSample(state, { putTx, saveKV });
