@@ -1,8 +1,8 @@
 // オフラインでも開けるようにアプリ本体をキャッシュ（データは IndexedDB）
-const CACHE = 'okane-navi-v4';
+const CACHE = 'okane-navi-v5';
 const FILES = [
   './', 'index.html', 'manifest.webmanifest', 'css/style.css',
-  'js/app.js', 'js/db.js', 'js/csv.js', 'js/importers.js', 'js/rules.js', 'js/finance.js', 'js/charts.js', 'js/util.js', 'js/sample.js',
+  'js/app.js', 'js/db.js', 'js/csv.js', 'js/importers.js', 'js/rules.js', 'js/finance.js', 'js/charts.js', 'js/util.js', 'js/sample.js', 'js/sync.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 

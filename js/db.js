@@ -1,5 +1,6 @@
 // IndexedDB による端末内保存。起動時に全件メモリへ読み込み、変更は都度書き込む
 import { defaultCategories, defaultRules } from './rules.js';
+import { defaultSync } from './sync.js';
 
 const DB_NAME = 'okane-navi';
 const VERSION = 1;
@@ -35,9 +36,10 @@ export const state = {
   budgets: {}, // カテゴリ名 → 月予算
   plan: null, // 給料・積立などの将来設定
   meta: {}, // 最終バックアップ日など
+  sync: null, // 自動連携の設定と状態
 };
 
-const KV_KEYS = ['accounts', 'categories', 'rules', 'snapshots', 'budgets', 'plan', 'meta'];
+const KV_KEYS = ['accounts', 'categories', 'rules', 'snapshots', 'budgets', 'plan', 'meta', 'sync'];
 
 export function defaultPlan() {
   return {
@@ -69,6 +71,7 @@ export async function load() {
   if (!state.rules.length) { state.rules = defaultRules(); changed = true; }
   if (!state.plan) { state.plan = defaultPlan(); changed = true; }
   else state.plan = { ...defaultPlan(), ...state.plan };
+  state.sync = { ...defaultSync(), ...(state.sync || {}) };
   if (changed) await saveKV('categories', 'rules', 'plan');
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
 }

@@ -9,6 +9,7 @@ import {
 import { donut, incomeExpenseBars, lines, legend } from './charts.js';
 import { uid, yen, man, today, thisMonth, addMonths, ymLabel, esc, norm, sum, groupBy, parseAmount, daysInMonth, pad } from './util.js';
 import { loadSample } from './sample.js';
+import { fetchSync, processSync, findNearDup, guessAccount } from './sync.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -126,6 +127,10 @@ function viewHome() {
   const pd = nextPayday(state.plan, now);
   const unc = state.tx.filter((t) => t.category === '未分類' && !t.excluded).length;
   const alerts = [];
+  const sy = state.sync;
+  if (sy.lastResult?.error) alerts.push(`<button class="alert warn" data-act="goto-sync">自動連携でエラー：${esc(sy.lastResult.error)} →</button>`);
+  if (sy.pending.length) alerts.push(`<button class="alert" data-act="goto-sync">自動連携：口座が決まっていない取引が <b>${sy.pending.length}件</b> あります →</button>`);
+  for (const n of sy.notices) alerts.push(`<div class="alert row-between"><button class="link-plain" data-act="notice" data-id="${esc(n.id)}">${esc(n.label)}：${Number(n.date.slice(5, 7))}/${Number(n.date.slice(8))} ${esc(n.text)}。<b>金額を記録 →</b></button><button class="icon-btn" data-act="notice-dismiss" data-id="${esc(n.id)}" aria-label="閉じる">×</button></div>`);
   if (unc) alerts.push(`<button class="alert" data-act="goto-uncategorized">未分類の取引が <b>${unc}件</b> あります →</button>`);
   for (const s of expiringPoints()) alerts.push(`<div class="alert warn">${esc(s.acc.name)}：${Math.round(s.value).toLocaleString()}${esc(unitOf(s.acc))} が ${s.expiry} に失効予定</div>`);
   const lastBackup = state.meta.lastBackup;
@@ -173,10 +178,11 @@ function viewHome() {
 
   ${futureCard()}
 
-  ${cards.length || o.upcomingFixed.length ? `<section class="card">
+  ${cards.length || o.upcomingFixed.length || sy.scheduled.length ? `<section class="card">
     <h3>これからの引き落とし</h3>
     <ul class="simple">
       ${cards.flatMap((x) => x.u.schedule.map((s) => `<li><span>${s.date.slice(5).replace('-', '/')} ${esc(x.a.name)}</span><b class="minus">${yen(s.amount)}</b></li>`)).join('')}
+      ${sy.scheduled.map((x) => `<li><span>${x.date.slice(5).replace('-', '/')} ${esc(x.payee)} <small class="muted">${esc(x.label)}から引落予定</small></span><b class="minus">${yen(-x.amount)}</b></li>`).join('')}
       ${o.upcomingFixed.map((r) => `<li><span>${r.day}日頃 ${esc(r.payee)} <small class="muted">固定費</small></span><b class="minus">${yen(r.monthly)}</b></li>`).join('')}
     </ul>
   </section>` : ''}
@@ -296,9 +302,9 @@ function mountTx(v) {
   $('#f-unc', v).onchange = (e) => { f.uncategorized = e.target.checked; render(); };
 }
 
-function editTx(t) {
+function editTx(t, preset = null, onSaved = null) {
   const isNew = !t;
-  t = t ? { ...t } : { id: uid(), date: today(), amount: 0, kind: 'expense', category: '未分類', accountId: activeAccounts().find((a) => !isValuationType(a.type))?.id, payee: '', memo: '', source: 'manual' };
+  t = t ? { ...t } : { id: uid(), date: today(), amount: 0, kind: 'expense', category: '未分類', accountId: activeAccounts().find((a) => !isValuationType(a.type))?.id, payee: '', memo: '', source: 'manual', ...preset };
   const orig = { ...t };
   const html = `<form id="txf" class="form">
     <div class="seg" id="kind">${Object.entries(KINDS).map(([k, l]) => `<button type="button" data-k="${k}" class="${t.kind === k ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -316,7 +322,7 @@ function editTx(t) {
   </form>`;
   openSheet(isNew ? '取引を追加' : '取引を編集', html, (b) => {
     const dir = $('#dir', b);
-    dir.value = t.amount > 0 ? '1' : '-1';
+    dir.value = t.amount > 0 || (!t.amount && t.kind === 'income') ? '1' : '-1';
     const fillCats = () => {
       $('#cat', b).innerHTML = catsOf(t.kind).map((c) => `<option ${c.name === t.category ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
     };
@@ -359,6 +365,7 @@ function editTx(t) {
         await saveKV('rules');
       }
       await putTx(updates);
+      await onSaved?.();
       closeSheet(); render();
       toast(updates.length > 1 ? `${updates.length}件を「${t.category}」にしました` : '保存しました');
     };
@@ -419,7 +426,15 @@ function prepare(list, acc) {
 
 function importSummary(list) {
   const existing = new Set(state.tx.map((t) => t.extId).filter(Boolean));
-  const fresh = list.filter((t) => !existing.has(t.extId));
+  const used = new Set();
+  const auto = state.tx.filter((t) => t.source === 'mail' || t.source === 'shortcut');
+  // 自動連携で入っている取引と同じものは重複として扱う
+  const fresh = list.filter((t) => {
+    if (existing.has(t.extId)) return false;
+    const d = findNearDup(auto, t, used);
+    if (d) { used.add(d.id); return false; }
+    return true;
+  });
   const dates = list.map((t) => t.date).sort();
   return { fresh, dup: list.length - fresh.length, from: dates[0], to: dates[dates.length - 1] };
 }
@@ -933,6 +948,7 @@ function viewSettings() {
     <ul class="simple">${state.accounts.map((a) => `<li class="tap" data-act="account" data-id="${a.id}"><span>${ACCOUNT_TYPES[a.type].icon} ${esc(a.name)}${a.archived ? ' <small class="muted">非表示</small>' : ''}</span><small class="muted">${a.lastImport ? '取込 ' + a.lastImport : ''}</small></li>`).join('') || '<li class="muted">口座がありません</li>'}</ul>
     <button class="btn" data-act="import">明細CSVを取り込む</button>
   </section>
+  ${syncSection()}
   <section class="card">
     <h3>予算（月）</h3>
     <form id="budgets" class="form">${catsOf('expense').map((c) => `<label class="inline"><span><i class="sw" style="background:${c.color}"></i>${esc(c.name)}</span><input name="${esc(c.name)}" inputmode="numeric" value="${state.budgets[c.name] || ''}" placeholder="—"></label>`).join('')}</form>
@@ -961,6 +977,7 @@ function viewSettings() {
 }
 
 function mountSettings(v) {
+  mountSync(v);
   const bf = $('#budgets', v);
   let timer;
   bf.oninput = () => {
@@ -1082,6 +1099,149 @@ async function backup() {
   }
 }
 
+// ---------- 自動連携 ----------
+
+let syncing = false;
+
+async function runSync({ silent = false } = {}) {
+  const s = state.sync;
+  if (!s.url || !s.token || syncing) return;
+  syncing = true;
+  try {
+    const j = await fetchSync(s);
+    const add = processSync(state, j.items || []);
+    if (add.length) await putTx(add);
+    s.unparsed = (j.unparsed || []).slice(-20);
+    s.lastSync = new Date().toISOString();
+    s.lastResult = { ok: true, added: add.length, at: s.lastSync };
+    await saveKV('sync');
+    if (!$('#sheet').classList.contains('open') && !document.activeElement?.matches('input, select')) render();
+    if (add.length || !silent) toast(`自動連携：${add.length}件を追加しました${s.pending.length ? `（口座未設定 ${s.pending.length}件）` : ''}`);
+  } catch (err) {
+    s.lastResult = { error: err.message, at: new Date().toISOString() };
+    await saveKV('sync');
+    if (!silent) toast(err.message);
+    else if (!$('#sheet').classList.contains('open')) render();
+  } finally {
+    syncing = false;
+  }
+}
+
+function syncSection() {
+  const s = state.sync;
+  const keys = Object.entries(s.keys).sort((a, b) => a[1].label.localeCompare(b[1].label));
+  const accOpts = (sel, src) => {
+    const types = src === 'smbc-bank' ? ['bank'] : ['card', 'paypay', 'bank', 'cash'];
+    return `<option value="">（未設定）</option><option value="skip" ${sel === 'skip' ? 'selected' : ''}>取り込まない</option>` +
+      activeAccounts().filter((a) => types.includes(a.type)).map((a) => `<option value="${a.id}" ${sel === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
+  };
+  const status = !s.url ? '未設定' : s.lastResult?.error ? `<span class="minus">エラー：${esc(s.lastResult.error)}</span>` : s.lastSync ? `最終同期 ${new Date(s.lastSync).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '未同期';
+  return `<section class="card" id="sync">
+    <h3>自動連携</h3>
+    <p class="muted">カード・銀行の利用通知メール（Gmail）と、Apple Payでの支払い（iPhoneのショートカット）から、取引を自動で取り込みます。アプリを開くたびに同期します。</p>
+    <div class="notice">状態：${status}</div>
+    <form class="form" id="syncf">
+      <label>連携URL<input id="sy-url" value="${esc(s.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" autocapitalize="off"></label>
+      <label>合言葉<input id="sy-token" value="${esc(s.token)}" autocomplete="off" autocapitalize="off"></label>
+      <button class="btn primary">保存して同期</button>
+    </form>
+    ${keys.length ? `<div class="label">通知と口座の対応</div>
+      <form class="form" id="sy-map">${keys.map(([k, v]) => `<label>${esc(v.label)}<select data-key="${esc(k)}">${accOpts(s.map[k], v.source)}</select></label>`).join('')}</form>` : ''}
+    ${s.pending.length ? `<div class="notice warn">口座が決まっていない取引が ${s.pending.length}件 あります。上で口座を選ぶと取り込まれます。</div>` : ''}
+    ${s.unparsed.length ? `<details class="help"><summary>読み取れなかったメール（${s.unparsed.length}件）</summary><ul class="simple">${s.unparsed.map((u) => `<li><span>${esc(u.date)} ${esc(u.subject)}</span></li>`).join('')}</ul></details>` : ''}
+    <details class="help"><summary>① Gmail連携の設定方法（最初に1回・約5分）</summary>
+      <ol class="steps">
+        <li>下のボタンでスクリプトをコピー<button type="button" class="btn small" id="sy-copy">スクリプトをコピー</button></li>
+        <li>Safariで <b>script.google.com</b> を開き、Gmailと同じGoogleアカウントでログイン →「新しいプロジェクト」</li>
+        <li>最初から入っている文字を全部消して、コピーしたスクリプトを貼り付け → 💾保存</li>
+        <li>上の関数の選択で <b>setup</b> を選び「実行」→ 権限の確認で自分のアカウントを選び「許可」<br><small>「このアプリは確認されていません」と出たら「詳細」→「（安全ではないページ）に移動」。自分で作ったスクリプトなので問題ありません。</small></li>
+        <li>下の「実行ログ」に出る <b>合言葉</b> をコピーして、上の「合言葉」に貼り付け</li>
+        <li>右上「デプロイ」→「新しいデプロイ」→ 種類の⚙で「ウェブアプリ」→ 次のユーザーとして実行：<b>自分</b>、アクセスできるユーザー：<b>全員</b> →「デプロイ」</li>
+        <li>表示された「ウェブアプリのURL」をコピーして、上の「連携URL」に貼り付け →「保存して同期」</li>
+      </ol>
+      <p>読み取れるメール：三井住友カード（Olive・Amazonマスター等）と ANA JCBカードの「ご利用のお知らせ」、三井住友銀行の「口座出金」「引き落としの事前お知らせ」「振込入金」。<br>
+      ・三井住友銀行の振込入金メールには金額が書かれていないため、ホームに「金額を記録」のお知らせを出します。<br>
+      ・携帯料金・公共料金など毎月の自動払いは、カード会社が通知メールを送らないことがあります。月1回カード明細CSVを取り込むと確実です（重複は自動でスキップ）。<br>
+      ・セゾン・PayPay・ゆうちょ・SBIは利用ごとのメールが届かないため、CSV取り込みかショートカットを使ってください。</p>
+      <p>合言葉を知っている人だけが連携URLから明細を読めます。合言葉は人に教えないでください。</p>
+    </details>
+    <details class="help"><summary>② Apple Payの支払いを自動記録（iPhoneのショートカット）</summary>
+      <ol class="steps">
+        <li>「ショートカット」アプリ → 下の「オートメーション」→ 右上「＋」</li>
+        <li>「ウォレット」を選び、記録したいカード（セゾン・Suicaなど）を選ぶ →「すぐに実行」→「次へ」</li>
+        <li>「新規の空のオートメーション」→「アクションを追加」で <b>URLの内容を取得</b> を追加</li>
+        <li>URLに上の「連携URL」を入れ、「>」を開いて 方法：<b>POST</b>、本文を要求：<b>JSON</b></li>
+        <li>「新規フィールドを追加」→「テキスト」で次の4つを追加：<br>
+          <code>token</code> … 合言葉<br>
+          <code>amount</code> … 変数「ショートカットの入力」→「金額」<br>
+          <code>merchant</code> … 「ショートカットの入力」→「加盟店」<br>
+          <code>card</code> … 「ショートカットの入力」→「カードまたはパス」</li>
+        <li>「完了」。以後、そのカードで支払うと自動で記録され、次にアプリを開いた時に取り込まれます。</li>
+      </ol>
+      <p>メール通知があるカード（三井住友・JCB）は、ショートカットと両方で記録されても1件にまとめます。</p>
+    </details>
+    ${s.url ? '<button type="button" class="btn" id="sy-now">今すぐ同期</button><button type="button" class="btn ghost" id="sy-off">自動連携をやめる</button>' : ''}
+  </section>`;
+}
+
+function mountSync(v) {
+  const s = state.sync;
+  $('#syncf', v).onsubmit = async (e) => {
+    e.preventDefault();
+    s.url = $('#sy-url', v).value.trim();
+    s.token = $('#sy-token', v).value.trim();
+    if (!/^https:\/\//.test(s.url)) return toast('連携URLを入力してください');
+    if (!s.token) return toast('合言葉を入力してください');
+    await saveKV('sync');
+    await runSync();
+    render();
+  };
+  $('#sy-map', v)?.addEventListener('change', async (e) => {
+    const k = e.target.dataset.key;
+    if (!k) return;
+    if (e.target.value) s.map[k] = e.target.value; else delete s.map[k];
+    const add = processSync(state, []);
+    if (add.length) await putTx(add);
+    await saveKV('sync');
+    render();
+    if (add.length) toast(`${add.length}件を取り込みました`);
+  });
+  $('#sy-copy', v).onclick = async () => {
+    try {
+      const code = await (await fetch('gas/Code.gs', { cache: 'no-store' })).text();
+      await navigator.clipboard.writeText(code);
+      toast('スクリプトをコピーしました');
+    } catch {
+      window.open('gas/Code.gs', '_blank');
+    }
+  };
+  $('#sy-now', v)?.addEventListener('click', () => runSync());
+  $('#sy-off', v)?.addEventListener('click', async () => {
+    if (!confirm('自動連携をやめますか？（取り込み済みの取引は残ります）')) return;
+    s.url = ''; s.token = ''; s.lastResult = null;
+    await saveKV('sync'); render();
+  });
+}
+
+function openNotice(id) {
+  const n = state.sync.notices.find((x) => x.id === id);
+  if (!n) return;
+  const acc = state.accounts.find((a) => a.id === state.sync.map[n.key]) || guessAccount(state.accounts, n);
+  const payday = state.plan.payday || 25;
+  const nearPayday = Math.abs(Number(n.date.slice(8)) - payday) <= 3;
+  editTx(null, {
+    kind: 'income', category: nearPayday ? '給与' : 'その他収入', date: n.date, payee: '振込入金',
+    accountId: acc?.id || activeAccounts().find((a) => a.type === 'bank')?.id,
+  }, () => dismissNotice(id));
+}
+
+async function dismissNotice(id) {
+  const s = state.sync;
+  s.notices = s.notices.filter((n) => n.id !== id);
+  s.dismissed = [...s.dismissed, id].slice(-300);
+  await saveKV('sync');
+}
+
 // ---------- ルーティング ----------
 
 const VIEWS = { home: viewHome, tx: viewTx, analysis: viewAnalysis, future: viewFuture, settings: viewSettings };
@@ -1103,6 +1263,9 @@ document.addEventListener('click', async (e) => {
     case 'account': accountSheet(el.dataset.id); break;
     case 'cat-month': catMonthSheet(el.dataset.cat); break;
     case 'backup': backup(); break;
+    case 'goto-sync': ui.tab = 'settings'; render(); setTimeout(() => $('#sync')?.scrollIntoView({ block: 'start' }), 50); break;
+    case 'notice': openNotice(el.dataset.id); break;
+    case 'notice-dismiss': await dismissNotice(el.dataset.id); render(); break;
     case 'goto-uncategorized': ui.tab = 'tx'; ui.txFilter = { q: '', account: '', category: '', uncategorized: true }; render(); break;
     case 'sample':
       if (state.tx.length && !confirm('今のデータにサンプルを追加します。よろしいですか？')) return;
@@ -1120,5 +1283,10 @@ document.addEventListener('click', async (e) => {
     return;
   }
   render();
+  runSync({ silent: true });
+  document.addEventListener('visibilitychange', () => {
+    const last = state.sync.lastSync ? Date.parse(state.sync.lastSync) : 0;
+    if (document.visibilityState === 'visible' && Date.now() - last > 5 * 60000) runSync({ silent: true });
+  });
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
 })();
