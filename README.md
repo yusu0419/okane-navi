@@ -33,3 +33,7 @@ npm test    # 取り込み・集計ロジックのテスト
 ```
 
 ビルドは不要です（素の HTML/CSS/JavaScript）。
+
+## ライセンス
+
+フォント「Zen Kaku Gothic New」（`fonts/`）は SIL Open Font License 1.1 のもとで同梱しています。
