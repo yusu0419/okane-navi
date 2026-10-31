@@ -109,7 +109,7 @@ function renderNav() {
 
 function render() {
   renderNav();
-  $('#title').textContent = TABS[ui.tab].label === 'ホーム' ? 'おかねナビ' : TABS[ui.tab].label;
+  $('#title').textContent = ui.tab === 'home' ? 'おかねナビ' : TABS[ui.tab].label;
   const v = $('#view');
   v.innerHTML = VIEWS[ui.tab]();
   MOUNT[ui.tab]?.(v);
@@ -150,7 +150,7 @@ function viewHome() {
       <span>ポイント <b>${yen(nw.points)}</b></span>
       <span>カード未払 <b class="neg">${yen(nw.card)}</b></span>
     </div>
-    ${lines([{ color: 'var(--accent)', values: hist.map((h) => h.total) }], hist.map((h) => h.ym), { height: 120, area: true, fmtLabel: (l) => Number(l.slice(5)) + '月' })}
+    ${lines([{ color: '#c4d700', values: hist.map((h) => h.total) }], hist.map((h) => h.ym), { height: 120, area: true, fmtLabel: (l) => Number(l.slice(5)) + '月' })}
   </section>
 
   <section class="card">
@@ -170,6 +170,8 @@ function viewHome() {
     </div>
     ${budgetBars(o.ym)}
   </section>
+
+  ${futureCard()}
 
   ${cards.length || o.upcomingFixed.length ? `<section class="card">
     <h3>これからの引き落とし</h3>
@@ -725,10 +727,10 @@ function viewAnalysis() {
     <h3>資産の推移</h3>
     ${lines([
       { color: 'var(--accent)', values: nwh.map((h) => h.total) },
-      { color: '#2a9d8f', values: nwh.map((h) => h.cash) },
-      { color: '#9d4edd', values: nwh.map((h) => h.invest) },
+      { color: '#8fae00', values: nwh.map((h) => h.cash) },
+      { color: '#2f7fd0', values: nwh.map((h) => h.invest) },
     ], nwh.map((h) => h.ym), { fmtLabel: (l) => Number(l.slice(5)) + '月' })}
-    ${legend([{ label: '純資産', color: 'var(--accent)' }, { label: '預金・現金', color: '#2a9d8f' }, { label: '投資', color: '#9d4edd' }])}
+    ${legend([{ label: '純資産', color: 'var(--accent)' }, { label: '預金・現金', color: '#8fae00' }, { label: '投資', color: '#2f7fd0' }])}
     ${inv.value ? `<div class="muted">投資評価額 ${yen(inv.value)}（元本 ${yen(inv.cost)}、損益 <b class="${inv.gain >= 0 ? 'plus' : 'minus'}">${yen(inv.gain, { sign: true })}</b>）</div>` : ''}
     <p class="muted">証券・ポイントは記録した日の評価額で計算します。</p>
   </section>
@@ -756,23 +758,95 @@ function startPosition() {
   return { ym: thisMonth(), cash: nw.cash + nw.card, invest: nw.invest, investCost: inv.cost || nw.invest, other: nw.points };
 }
 
-function viewFuture() {
+function futureModel() {
   const p = state.plan;
   const avg = averageMonthly(state, 3, thisMonth());
   const living = p.living ?? Math.round(avg?.expense || 0);
   const plan = { ...p, living };
   const start = startPosition();
+  const rate = Number(p.returnRate) || 0;
   const rows = simulate(plan, start);
+  const low = simulate({ ...plan, returnRate: Math.max(0, rate - 2) }, start);
+  const high = simulate({ ...plan, returnRate: rate + 2 }, start);
+  return { p, avg, living, plan, start, rows, low, high, rate };
+}
+
+const ageAt = (p, i) => (p.age ? Math.floor(Number(p.age) + i / 12) : null);
+const ageLabel = (p, i) => (p.age ? `（${ageAt(p, i)}歳）` : '');
+
+function futureCard() {
+  if (!state.plan.salary) return '';
+  const { p, rows } = futureModel();
+  const yearly = rows.filter((r, i) => i === 0 || r.ym.endsWith('-12') || i === rows.length - 1);
+  const at = (y) => rows[Math.min(rows.length - 1, y * 12)];
+  const ys = [5, 10, 20].filter((y) => y <= p.years);
+  return `<section class="card tap" data-act="tab" data-tab="future">
+    <div class="row-between"><h3>将来の資産の見通し</h3><span class="link">詳しく ›</span></div>
+    <div class="stats3">${ys.map((y) => `<div><div class="label">${y}年後${p.age ? `・${ageAt(p, y * 12)}歳` : ''}</div><div>${man(at(y).total)}円</div></div>`).join('')}</div>
+    ${lines([{ color: 'var(--accent)', values: yearly.map((r) => r.total) }], yearly.map((r) => r.ym), { height: 110, area: true, fmtLabel: (l) => "'" + l.slice(2, 4) })}
+  </section>`;
+}
+
+function viewFuture() {
+  const { p, avg, living, start, rows, low, high, rate } = futureModel();
   const yearly = rows.filter((r, i) => i === 0 || r.ym.endsWith('-12') || i === rows.length - 1);
   const monthlyFlow = (Number(p.salary) || 0) - living;
   const annualBonus = (Number(p.bonus) || 0) * (p.bonusMonths || []).length;
   const yearlySave = monthlyFlow * 12 + annualBonus;
   const negative = rows.find((r) => r.cash < 0);
-  const milestones = [1000, 2000, 3000, 5000, 10000].map((m) => ({ m, r: rows.find((r) => r.total >= m * 10000) })).filter((x) => x.r && x.r !== rows[0]);
-  const pick = (y) => rows[Math.min(rows.length - 1, y * 12)];
+  const milestones = [1000, 2000, 3000, 5000, 10000].map((m) => ({ m, i: rows.findIndex((r) => r.total >= m * 10000) })).filter((x) => x.i > 0);
+  const pick = (arr, y) => arr[Math.min(arr.length - 1, y * 12)];
+  const last = rows[rows.length - 1];
   const fire = living ? (living * 12) / 0.04 : 0;
-  const fireRow = fire ? rows.find((r) => r.invest >= fire) : null;
-  return `
+  const fireI = fire ? rows.findIndex((r) => r.invest >= fire) : -1;
+  const goal = Number(p.goal) || 0;
+  const goalI = goal ? rows.findIndex((r) => r.total >= goal) : -1;
+  const setup = !p.salary;
+  return `<div id="fut-res">
+  ${setup ? '<div class="alert">下の「給料と毎月のお金」に手取りなどを入れると、将来の資産が計算されます。</div>' : `
+  <section class="card hero">
+    <div class="label">${p.years}年後${p.age ? `（${ageAt(p, p.years * 12)}歳）` : ''}の資産の見込み</div>
+    <div class="big">${man(last.total)}円</div>
+    <div class="breakdown">
+      <span>預金 <b>${man(last.cash)}円</b></span>
+      <span>投資 <b>${man(last.invest)}円</b></span>
+      <span>うち運用益 <b>${man(last.invest - last.principal)}円</b></span>
+      <span>年あたり <b>+${man((last.total - rows[0].total) / p.years)}円</b></span>
+    </div>
+    ${lines([
+      { color: '#c4d700', values: yearly.map((r) => r.total) },
+      { color: 'rgba(255,255,255,.8)', values: yearly.map((r) => r.cash) },
+      { color: '#7fd4ff', values: yearly.map((r) => r.invest) },
+    ], yearly.map((r) => r.ym), { height: 200, fmtLabel: (l) => "'" + l.slice(2, 4) })}
+    ${legend([{ label: '合計', color: '#c4d700' }, { label: '預金', color: 'rgba(255,255,255,.8)' }, { label: '投資評価額', color: '#7fd4ff' }])}
+  </section>
+  ${negative ? `<div class="alert warn">${ymLabel(negative.ym)}${ageLabel(p, rows.indexOf(negative))}に預金がマイナスになります。生活費か積立額を見直しましょう。</div>` : ''}
+
+  <section class="card">
+    <h3>年ごとの資産</h3>
+    <table class="tbl"><tr><th></th><th>預金</th><th>投資</th><th>合計</th></tr>
+      ${[0, 1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50].filter((y) => y <= p.years).map((y) => { const r = pick(rows, y); return `<tr><td>${y ? y + '年後' : '今'}${p.age ? `<small class="muted"> ${ageAt(p, y * 12)}歳</small>` : ''}</td><td>${man(r.cash)}</td><td>${man(r.invest)}</td><td><b>${man(r.total)}</b></td></tr>`; }).join('')}
+    </table>
+  </section>
+
+  <section class="card">
+    <h3>運用成績による違い</h3>
+    <p class="muted">利回りが想定より±2%ずれた場合の合計資産です。</p>
+    <table class="tbl"><tr><th></th><th>悲観 ${Math.max(0, rate - 2)}%</th><th>標準 ${rate}%</th><th>楽観 ${rate + 2}%</th></tr>
+      ${[5, 10, 20, 30].filter((y) => y <= p.years).map((y) => `<tr><td>${y}年後</td><td>${man(pick(low, y).total)}</td><td><b>${man(pick(rows, y).total)}</b></td><td>${man(pick(high, y).total)}</td></tr>`).join('')}
+    </table>
+  </section>
+
+  <section class="card">
+    <h3>目標と節目</h3>
+    <ul class="simple">
+      ${goal ? `<li><span>目標 ${man(goal)}円</span><b>${goalI > 0 ? ymLabel(rows[goalI].ym) + ageLabel(p, goalI) : goalI === 0 ? '達成済み' : '期間内は未到達'}</b></li>` : ''}
+      ${milestones.map((x) => `<li><span>資産 ${x.m >= 10000 ? '1億' : x.m + '万'}円</span><b>${ymLabel(rows[x.i].ym)}${ageLabel(p, x.i)}</b></li>`).join('')}
+      ${fire ? `<li><span>運用益で生活できる目安<br><small class="muted">投資額が年間生活費÷4%＝${man(fire)}円</small></span><b>${fireI > 0 ? ymLabel(rows[fireI].ym) + ageLabel(p, fireI) : fireI === 0 ? '達成済み' : '期間内は未到達'}</b></li>` : ''}
+    </ul>
+  </section>`}
+  </div>
+
   <section class="card">
     <h3>給料と毎月のお金</h3>
     <form class="form" id="plan">
@@ -785,31 +859,16 @@ function viewFuture() {
         <label>毎月の積立投資<input name="invest" inputmode="numeric" value="${p.invest || ''}" placeholder="30000"></label>
         <label>想定利回り（年%）<input name="returnRate" inputmode="decimal" value="${p.returnRate}"></label>
         <label>昇給率（年%）<input name="salaryGrowth" inputmode="decimal" value="${p.salaryGrowth}"></label>
+        <label>今の年齢<input name="age" inputmode="numeric" value="${p.age || ''}" placeholder="任意"></label>
+        <label>目標の資産額<input name="goal" inputmode="numeric" value="${p.goal || ''}" placeholder="10000000"></label>
         <label>シミュレーション年数<input name="years" inputmode="numeric" value="${p.years}"></label>
       </div>
     </form>
-    <div class="stats3 compact">
+    <div class="stats3 compact" id="fut-stats">
       <div><div class="label">毎月の余剰</div><div class="${monthlyFlow - (p.invest || 0) >= 0 ? 'plus' : 'minus'}">${yen(monthlyFlow - (p.invest || 0), { sign: true })}</div></div>
       <div><div class="label">年間の貯蓄＋投資</div><div>${yen(yearlySave)}</div></div>
       <div><div class="label">貯蓄率</div><div>${p.salary ? Math.round((yearlySave / ((p.salary * 12) + annualBonus)) * 100) : 0}%</div></div>
     </div>
-  </section>
-
-  <section class="card">
-    <h3>資産の見通し</h3>
-    ${lines([
-      { color: 'var(--accent)', values: yearly.map((r) => r.total) },
-      { color: '#2a9d8f', values: yearly.map((r) => r.cash) },
-      { color: '#9d4edd', values: yearly.map((r) => r.invest) },
-      { color: '#c0a080', values: yearly.map((r) => r.principal) },
-    ], yearly.map((r) => r.ym), { height: 220, fmtLabel: (l) => "'" + l.slice(2, 4) })}
-    ${legend([{ label: '合計', color: 'var(--accent)' }, { label: '預金', color: '#2a9d8f' }, { label: '投資評価額', color: '#9d4edd' }, { label: '投資元本', color: '#c0a080' }])}
-    ${negative ? `<div class="notice warn">${ymLabel(negative.ym)}に預金がマイナスになります。生活費か積立額を見直しましょう。</div>` : ''}
-    <table class="tbl"><tr><th></th><th>預金</th><th>投資</th><th>合計</th></tr>
-      ${[0, 1, 3, 5, 10, 20, 30].filter((y) => y <= p.years).map((y) => { const r = pick(y); return `<tr><td>${y ? y + '年後' : '今'}</td><td>${man(r.cash)}</td><td>${man(r.invest)}</td><td><b>${man(r.total)}</b></td></tr>`; }).join('')}
-    </table>
-    ${milestones.length ? `<ul class="simple">${milestones.map((x) => `<li><span>資産 ${x.m >= 10000 ? '1億' : x.m + '万'}円 到達</span><b>${ymLabel(x.r.ym)}</b></li>`).join('')}</ul>` : ''}
-    ${fire ? `<p class="muted">投資額が「年間生活費 ÷ 4%」＝${man(fire)}円に届くと、運用益で生活費をまかなえる目安です${fireRow ? `（${ymLabel(fireRow.ym)}頃）` : '（期間内は未到達）'}。</p>` : ''}
   </section>
 
   <section class="card">
@@ -835,10 +894,13 @@ function mountFuture(v) {
       p.returnRate = num('returnRate');
       p.salaryGrowth = num('salaryGrowth');
       p.years = Math.min(50, Math.max(1, num('years') || 20));
+      p.age = num('age') || null;
+      p.goal = num('goal') || null;
       await saveKV('plan');
-      const y = window.scrollY;
-      render();
-      window.scrollTo(0, y);
+      // 入力中の欄を消さないよう、結果部分だけ描き直す
+      const tmp = document.createElement('div');
+      tmp.innerHTML = viewFuture();
+      for (const id of ['fut-res', 'fut-stats']) $('#' + id, v).innerHTML = $('#' + id, tmp).innerHTML;
     }
   };
   $('#ev-add', v).onclick = () => {

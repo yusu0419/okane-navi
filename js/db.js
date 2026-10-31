@@ -49,7 +49,9 @@ export function defaultPlan() {
     invest: 0, // 毎月の積立額
     returnRate: 4, // 想定利回り（年%）
     salaryGrowth: 1, // 昇給率（年%）
-    years: 20,
+    years: 30,
+    age: null, // 今の年齢（任意）
+    goal: null, // 目標資産額
     events: [], // { ym, amount, label } 大きな出費・収入の予定
   };
 }
