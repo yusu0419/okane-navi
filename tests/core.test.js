@@ -175,3 +175,20 @@ test('detectRecurring finds subscriptions but not supermarkets', () => {
   assert.deepEqual(r.map((x) => x.payee), ['Netflix']);
   assert.equal(r[0].monthly, 1490);
 });
+
+test('セゾンカードの明細CSV（先頭に請求情報の行がある形式）', () => {
+  const csv = `カード名称,セゾンゴールド・アメリカン・エキスプレス・カード
+お支払日,2026/10/05
+今回ご請求額,0000001500
+
+利用日,ご利用店名及び商品名,本人・家族区分,支払区分名称,締前入金区分,利用金額,備考
+2026/08/12,ETC西日本  (テスト→テスト),,1回,,1000,
+2026/08/13,テストでんき,,1回,,500,`;
+  const rows = parseCSV(csv);
+  const { mapping } = guessMapping(rows, 'card');
+  const list = parseGeneric(rows, mapping);
+  assert.deepEqual(list.map((t) => [t.date, t.amount]), [['2026-08-12', -1000], ['2026-08-13', -500]]);
+  const rules = defaultRules();
+  list.forEach((t) => categorize(t, rules, 'card'));
+  assert.deepEqual(list.map((t) => t.category), ['交通費', '水道光熱費']);
+});
