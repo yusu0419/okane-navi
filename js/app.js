@@ -1355,6 +1355,19 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+// 未分類のまま残っている取引に、最新のルールをあてる（手で直したものは触らない）
+async function fillUncategorized() {
+  const upd = [];
+  for (const t of state.tx) {
+    if (t.userSet || t.category !== '未分類') continue;
+    const x = { ...t, kind: null, category: null };
+    categorize(x, state.rules, accById(t.accountId)?.type, t.kind);
+    if (x.category !== '未分類') upd.push(x);
+  }
+  if (upd.length) await putTx(upd);
+  return upd.length;
+}
+
 (async function init() {
   try {
     await load();
@@ -1362,6 +1375,7 @@ document.addEventListener('click', async (e) => {
     $('#view').innerHTML = `<div class="card">データベースを開けませんでした：${esc(err.message)}<br>プライベートブラウズでは使えません。</div>`;
     return;
   }
+  await fillUncategorized();
   render();
   runSync({ silent: true });
   document.addEventListener('visibilitychange', () => {

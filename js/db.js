@@ -68,11 +68,19 @@ export async function load() {
   }
   let changed = false;
   if (!state.categories.length) { state.categories = defaultCategories(); changed = true; }
-  if (!state.rules.length) { state.rules = defaultRules(); changed = true; }
+  // 標準ルールは毎回最新版に入れ替える（学習・手動で追加したルールはそのまま先頭に残す）
+  const fresh = defaultRules();
+  const builtinKey = (r) => [r.keyword, r.kind, r.category, (r.accountTypes || []).join(',')].join('|');
+  const oldBuiltin = state.rules.filter((r) => r.builtin).map(builtinKey).join('\n');
+  if (!state.rules.length || oldBuiltin !== fresh.map(builtinKey).join('\n')) {
+    state.rules = [...state.rules.filter((r) => !r.builtin), ...fresh];
+    changed = true;
+  }
   if (!state.plan) { state.plan = defaultPlan(); changed = true; }
   else state.plan = { ...defaultPlan(), ...state.plan };
   state.sync = { ...defaultSync(), ...(state.sync || {}) };
   if (changed) await saveKV('categories', 'rules', 'plan');
+  return { rulesUpdated: changed };
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
 }
 
