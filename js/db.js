@@ -68,6 +68,11 @@ export async function load() {
   }
   let changed = false;
   if (!state.categories.length) { state.categories = defaultCategories(); changed = true; }
+  else {
+    const have = new Set(state.categories.map((c) => c.name));
+    const missing = defaultCategories().filter((c) => !have.has(c.name));
+    if (missing.length) { state.categories.push(...missing); changed = true; }
+  }
   // 標準ルールは毎回最新版に入れ替える（学習・手動で追加したルールはそのまま先頭に残す）
   const fresh = defaultRules();
   const builtinKey = (r) => [r.keyword, r.kind, r.category, (r.accountTypes || []).join(',')].join('|');

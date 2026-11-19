@@ -192,3 +192,22 @@ test('セゾンカードの明細CSV（先頭に請求情報の行がある形�
   list.forEach((t) => categorize(t, rules, 'card'));
   assert.deepEqual(list.map((t) => t.category), ['交通費', '水道光熱費']);
 });
+
+test('銀行明細の書き方（小さいカナ・長音）でもルールに一致し、残高列から最新残高を取れる', async () => {
+  const { latestBalances } = await import('../js/importers.js');
+  const csv = `年月日,お引出し,お預入れ,お取り扱い内容,残高,メモ,ラベル
+2026/11/18,220,,"カード手数料",9780,"",
+2026/11/18,10000,,"ｶｰﾄﾞ　ﾛ-ｿﾝ123456",10000,"",
+2026/11/10,50000,,"ﾊﾟｿｺﾝ振込 ｶ) ｴｽﾋﾞ-ｱｲｼﾖｳｹﾝ",20000,"",
+2026/11/1,,70000,"振込　ﾃｽﾄ",70000,"",`;
+  const rows = parseCSV(csv);
+  const { mapping } = guessMapping(rows, 'bank');
+  assert.equal(mapping.balance, 4);
+  const list = parseGeneric(rows, mapping).map((t) => ({ ...t, accountId: 'b' }));
+  const rules = defaultRules();
+  list.forEach((t) => categorize(t, rules, 'bank'));
+  assert.deepEqual(list.map((t) => t.category), ['手数料', '現金引出', '投資・積立', 'その他収入']);
+  assert.deepEqual(latestBalances(list), [{ accountId: 'b', date: '2026-11-18', value: 9780 }]);
+  // 古い順の明細でも最新を選ぶ
+  assert.deepEqual(latestBalances([...list].reverse()), [{ accountId: 'b', date: '2026-11-18', value: 9780 }]);
+});

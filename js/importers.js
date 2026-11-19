@@ -128,7 +128,9 @@ export function guessMapping(rows, accountType) {
   const headerRow = findHeaderRow(rows);
   const header = headerRow >= 0 ? rows[headerRow] : rows[0].map((_, i) => `列${i + 1}`);
   const data = rows.slice(headerRow + 1);
-  const m = { headerRow, date: -1, mode: 'split', out: -1, in: -1, amount: -1, desc: [], invert: false };
+  const m = { headerRow, date: -1, mode: 'split', out: -1, in: -1, amount: -1, desc: [], invert: false, balance: -1 };
+  // 残高の列（あれば取り込み時に口座残高を自動で合わせる）
+  m.balance = header.findIndex((h, i) => /残高/.test(h.replace(/\s/g, '')) && numericRatio(data, i) > 0.6);
 
   m.date = pick(header, data, DATE_WORDS);
   if (m.date < 0) m.date = header.findIndex((_, i) => data.slice(0, 10).some((r) => parseDate(r[i])));
@@ -169,7 +171,9 @@ export function parseGeneric(rows, m) {
     }
     if (!amount) continue;
     const payee = m.desc.map((ci) => r[ci]).filter(Boolean).join(' ');
-    out.push({ date, amount, payee, content: '', memo: '', source: 'csv' });
+    const t = { date, amount, payee, content: '', memo: '', source: 'csv' };
+    if (m.balance >= 0) { const b = parseAmount(r[m.balance]); if (b != null) t.balance = b; }
+    out.push(t);
   }
   return out;
 }
@@ -185,4 +189,23 @@ export function assignExtIds(txs, accountId) {
     t.extId = hash(base + '|' + n);
   }
   return txs;
+}
+
+// 明細の「残高」列から、口座ごとの最新残高を求める（明細が新しい順・古い順どちらでも可）
+export function latestBalances(list) {
+  const byAcc = new Map();
+  for (const t of list) {
+    if (t.balance == null) continue;
+    if (!byAcc.has(t.accountId)) byAcc.set(t.accountId, []);
+    byAcc.get(t.accountId).push(t);
+  }
+  const out = [];
+  for (const [accountId, rows] of byAcc) {
+    const desc = rows[0].date > rows[rows.length - 1].date;
+    const max = rows.reduce((a, t) => (t.date > a ? t.date : a), rows[0].date);
+    const same = rows.filter((t) => t.date === max);
+    const pick = desc ? same[0] : same[same.length - 1];
+    out.push({ accountId, date: max, value: pick.balance });
+  }
+  return out;
 }

@@ -1,6 +1,6 @@
 import { state, load, saveKV, putTx, deleteTx, exportAll, importAll, wipe, defaultPlan } from './db.js';
 import { decode, parseCSV, toCSV } from './csv.js';
-import { isPayPay, parsePayPay, guessMapping, parseGeneric, assignExtIds, findHeaderRow } from './importers.js';
+import { isPayPay, parsePayPay, guessMapping, parseGeneric, assignExtIds, findHeaderRow, latestBalances } from './importers.js';
 import { categorize, KINDS, defaultRules } from './rules.js';
 import {
   ACCOUNT_TYPES, isValuationType, balanceAt, balanceYen, toYen, cardUnpaid, netWorth, netWorthHistory,
@@ -457,6 +457,16 @@ function previewTable(list) {
 }
 
 async function commitImport(list) {
+  // 明細の残高列から口座残高を自動で合わせる（銀行・PayPay・現金）
+  const bals = latestBalances(list).filter((b) => ['bank', 'paypay', 'cash'].includes(accById(b.accountId)?.type));
+  for (const t of list) delete t.balance;
+  for (const b of bals) {
+    const cur = state.snapshots.filter((x) => x.accountId === b.accountId).sort((x, y) => y.date.localeCompare(x.date))[0];
+    if (cur && cur.date > b.date) continue; // もっと新しい残高合わせがあれば上書きしない
+    state.snapshots = state.snapshots.filter((x) => !(x.accountId === b.accountId && x.date === b.date));
+    state.snapshots.push({ id: uid(), accountId: b.accountId, date: b.date, value: b.value, auto: true });
+  }
+  if (bals.length) await saveKV('snapshots');
   const r = importSummary(list);
   await putTx([...r.fresh, ...r.confirm, ...r.review]);
   for (const t of list) {
@@ -1039,6 +1049,7 @@ function viewSettings() {
     <p class="muted">取引のお店名・内容にキーワードが含まれると自動で分類します。明細の分類を直すと自動で学習します。（標準ルール ${state.rules.length - userRules.length}件）</p>
     <ul class="simple">${userRules.map((r) => `<li><span>「${esc(r.keyword)}」→ ${esc(r.category)}</span><button class="icon-btn" data-rule-del="${r.id}">×</button></li>`).join('') || '<li class="muted">学習したルールはまだありません</li>'}</ul>
     <button class="btn" id="recat">すべての取引を再分類する</button>
+    <label class="btn file-btn">分類ルールのファイルを読み込む<input type="file" id="rules-file" accept=".json,application/json" hidden></label>
     <small class="muted">手で直した取引はそのままです</small>
   </section>
   <section class="card">
@@ -1115,6 +1126,35 @@ function mountSettings(v) {
     state.rules = state.rules.filter((r) => r.id !== x.dataset.ruleDel);
     await saveKV('rules'); render();
   }));
+  $('#rules-file', v).onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const o = JSON.parse(await f.text());
+      if (o.app !== 'okane-navi-rules' || !Array.isArray(o.rules)) throw new Error('分類ルールのファイルではありません');
+      let added = 0;
+      for (const r of [...o.rules].reverse()) {
+        if (!r.keyword || !KINDS[r.kind] || !r.category) continue;
+        if (!state.categories.some((c) => c.name === r.category)) state.categories.push({ name: r.category, kind: r.kind, color: '#7f8c8d' });
+        addRule(r.keyword, r.kind, r.category, r.accountTypes || null);
+        added++;
+      }
+      await saveKV('rules', 'categories');
+      // 手で直した取引以外に適用
+      const fresh = state.rules.filter((r) => !r.builtin).slice(0, added);
+      const upd = [];
+      for (const t of state.tx) {
+        if (t.userSet) continue;
+        const text = norm([t.payee, t.content, t.memo].join(' '));
+        const accType = accById(t.accountId)?.type;
+        const hit = fresh.find((r) => (!r.accountTypes || r.accountTypes.includes(accType)) && text.includes(norm(r.keyword)));
+        if (hit && (hit.kind !== t.kind || hit.category !== t.category)) upd.push({ ...t, kind: hit.kind, category: hit.category });
+      }
+      if (upd.length) await putTx(upd);
+      render();
+      toast(`ルール${added}件を読み込み、${upd.length}件の取引に適用しました`);
+    } catch (err) { alert('読み込めませんでした：' + err.message); }
+  };
   $('#recat', v).onclick = async () => {
     // 標準ルールは最新版に入れ替え（学習ルールは維持）
     state.rules = [...state.rules.filter((r) => !r.builtin), ...defaultRules()];
