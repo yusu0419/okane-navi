@@ -54,6 +54,10 @@ const DEFAULT_RULES = [
   ['証券', 'transfer', '投資・積立', ['bank', 'card']],
   ['ショウケン', 'transfer', '投資・積立', ['bank']],
   ['ATM', 'transfer', '現金引出', ['bank']],
+  // 自分用（よく使う店・確認済みの店）
+  ['マルトクショップ', 'expense', '特別な支出'],
+  ['アオイ', 'expense', '衣服・美容'],
+  ['ANAFESTA', 'expense', '交際費'],
   // 税金・社保（「保険」より先に）
   ['住民税', 'expense', '税・社会保険'],
   ['所得税', 'expense', '税・社会保険'],
