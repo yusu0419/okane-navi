@@ -517,8 +517,8 @@ function importPayPayUI(b, acc, rows) {
     const list = build();
     const s = importSummary(list);
     $('#pp-sum', body).innerHTML = `${summaryHtml(s)}
-      ${previewTable([...s.fresh, ...s.confirm])}
-      <button class="btn primary" id="pp-go" ${importCount(s) ? '' : 'disabled'}>${importCount(s)}件を取り込む</button>`;
+      <button class="btn primary" id="pp-go" ${importCount(s) ? '' : 'disabled'}>${importCount(s)}件を取り込む</button>
+      ${previewTable([...s.fresh, ...s.confirm])}`;
     $('#pp-go', body).onclick = () => commitImport(list);
   };
   body.onchange = refresh;
@@ -528,10 +528,14 @@ function importPayPayUI(b, acc, rows) {
 function importGenericUI(b, acc, rows, fileName) {
   const g = guessMapping(rows, acc.type);
   const sig = g.header.join('|');
-  const m = acc.importMapping?.sig === sig ? { ...acc.importMapping.m } : g.mapping;
+  const remembered = acc.importMapping?.sig === sig;
+  const m = remembered ? { ...g.mapping, ...acc.importMapping.m } : g.mapping;
+  const ok = m.date >= 0 && (m.mode === 'split' ? m.out >= 0 || m.in >= 0 : m.amount >= 0) && parseGeneric(rows, m).length > 0;
   const opts = (sel) => `<option value="-1">（なし）</option>` + g.header.map((h, i) => `<option value="${i}" ${sel === i ? 'selected' : ''}>${esc(h || `列${i + 1}`)}</option>`).join('');
   const body = $('#imp-body', b);
-  body.innerHTML = `<div class="notice">${esc(fileName)}：${rows.length - m.headerRow - 1}行。列の割り当てを確認してください。</div>
+  body.innerHTML = `<div class="notice">${esc(fileName)}：${ok ? (remembered ? '前回と同じ形式として読み取りました。' : '日付・金額・内容の列を自動で読み取りました。') : '<b class="minus">列を自動で読み取れませんでした。下の「列の割り当て」で日付と金額の列を選んでください。</b>'}</div>
+    <div id="g-sum"></div>
+    <details class="help" ${ok ? '' : 'open'}><summary>列の割り当て${ok ? 'を変更する（通常は不要）' : ''}</summary>
     <div class="grid2">
       <label>日付の列<select id="m-date">${opts(m.date)}</select></label>
       <label>金額の形式<select id="m-mode"><option value="split" ${m.mode === 'split' ? 'selected' : ''}>出金と入金が別の列</option><option value="signed" ${m.mode === 'signed' ? 'selected' : ''}>1つの列（±あり）</option></select></label>
@@ -542,7 +546,7 @@ function importGenericUI(b, acc, rows, fileName) {
       <label>内容の列<select id="m-desc">${opts(m.desc[0] ?? -1)}</select></label>
       <label>内容の列（追加）<select id="m-desc2">${opts(m.desc[1] ?? -1)}</select></label>
     </div>
-    <div id="g-sum"></div>`;
+    </details>`;
   const read = () => {
     m.date = Number($('#m-date', body).value);
     m.mode = $('#m-mode', body).value;
@@ -559,9 +563,9 @@ function importGenericUI(b, acc, rows, fileName) {
     const list = prepare(assignExtIds(parseGeneric(rows, m), acc.id), acc);
     const s = importSummary(list);
     $('#g-sum', body).innerHTML = `${summaryHtml(s)}
-      ${previewTable([...s.fresh, ...s.confirm])}
-      <p class="muted">プラス（緑）が入金、マイナスが出金になっていればOKです。</p>
-      <button class="btn primary" id="g-go" ${importCount(s) ? '' : 'disabled'}>${importCount(s)}件を取り込む</button>`;
+      <button class="btn primary" id="g-go" ${importCount(s) ? '' : 'disabled'}>${importCount(s)}件を取り込む</button>
+      <p class="muted">下の例で、プラス（緑）が入金、マイナスが出金になっていればOKです。</p>
+      ${previewTable([...s.fresh, ...s.confirm])}`;
     $('#g-go', body).onclick = async () => {
       acc.importMapping = { sig, m: { ...m } };
       await commitImport(list);
