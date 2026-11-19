@@ -211,3 +211,12 @@ test('銀行明細の書き方（小さいカナ・長音）でもルールに�
   // 古い順の明細でも最新を選ぶ
   assert.deepEqual(latestBalances([...list].reverse()), [{ accountId: 'b', date: '2026-11-18', value: 9780 }]);
 });
+
+test('fileKey', async () => {
+  const { fileKey } = await import('../js/importers.js');
+  assert.equal(fileKey('vpass-olive_2026-11.csv'), 'vpass-olive');
+  assert.equal(fileKey('vpass-amazon-mastercard_2025-12.csv'), 'vpass-amazon-mastercard');
+  assert.equal(fileKey('saison-gold-2026-11-payment.csv'), 'saison-gold-payment');
+  assert.equal(fileKey('smbc-bank_futsu_2025-11-20_2026-11-19.csv'), 'smbc-bank-futsu');
+  assert.equal(fileKey('vpass-olive_2026-11 (1).csv'), 'vpass-olive');
+});

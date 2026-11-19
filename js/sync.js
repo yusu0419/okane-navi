@@ -15,6 +15,11 @@ export function defaultSync() {
     notices: [], // 振込入金などのお知らせ
     dismissed: [],
     unparsed: [],
+    folder: '', // 明細CSVを置くGoogleドライブのフォルダ（URLまたはID）
+    files: {}, // 取り込み済みのドライブのファイル：ID → 更新日時
+    filesSince: '', // ここより後に更新されたファイルだけを受け取る
+    pendingFiles: [], // 口座が決まっていないファイル
+    skipKeys: [], // 取り込まないファイルの種類
   };
 }
 
@@ -61,10 +66,23 @@ export function sinceFor(s, now = today()) {
   return s.lastSync ? addDays(s.lastSync.slice(0, 10), -14) : addDays(now, -90);
 }
 
+// ドライブのフォルダURL（…/folders/<ID>…）またはIDそのものからIDを取り出す
+export function folderId(v) {
+  const s = String(v || '').trim();
+  const m = s.match(/folders\/([\w-]{10,})/) || s.match(/[?&]id=([\w-]{10,})/);
+  if (m) return m[1];
+  return /^[\w-]{10,}$/.test(s) ? s : '';
+}
+
 export async function fetchSync(s) {
   const u = new URL(s.url);
   u.searchParams.set('token', s.token);
   u.searchParams.set('since', sinceFor(s));
+  const folder = folderId(s.folder);
+  if (folder) {
+    u.searchParams.set('folder', folder);
+    if (s.filesSince) u.searchParams.set('filesSince', s.filesSince);
+  }
   let res;
   try {
     res = await fetch(u, { redirect: 'follow' });

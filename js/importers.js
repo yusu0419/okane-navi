@@ -209,3 +209,16 @@ export function latestBalances(list) {
   }
   return out;
 }
+
+// ファイル名から日付などを除いた「種類」を取り出す（例：vpass-olive_2026-11.csv → vpass-olive）
+// 中身に見出しの無いCSV（カードの未確定明細など）でも、どの口座のファイルかを覚えておくために使う
+export function fileKey(name) {
+  return String(name || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\.(csv|txt|tsv)$/, '')
+    .replace(/\s*\(\d+\)$|^copy of |^のコピー|のコピー$|\s*-\s*コピー$/g, '')
+    .replace(/\d{4}[-_./年]?\d{1,2}(?:[-_./月]?\d{1,2}日?)?/g, '')
+    .replace(/[-_\s.]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}

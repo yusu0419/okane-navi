@@ -3,6 +3,7 @@
  *
  * Gmail に届くカード・銀行の利用通知メールを読み取り、おかねナビに渡します。
  * iPhone のショートカット（Apple Pay で支払った時）からの記録も受け付けます。
+ * Googleドライブの指定フォルダに置かれた明細CSVも、おかねナビに渡します。
  * あなたの Google アカウントの中だけで動き、データは他の場所に送られません。
  *
  * 使い方はアプリの「設定 → 自動連携」を見てください。
@@ -37,7 +38,12 @@ function doGet(e) {
   const p = (e && e.parameter) || {};
   if (!checkToken_(p.token)) return json_({ error: 'unauthorized' });
   const since = /^\d{4}-\d{2}-\d{2}$/.test(p.since || '') ? p.since : daysAgo_(60);
-  return json_(collect_(since));
+  const res = collect_(since);
+  if (p.folder) {
+    try { res.files = listFiles_(p.folder, p.filesSince || ''); }
+    catch (err) { res.filesError = 'ドライブのフォルダを読めませんでした（' + err.message + '）'; }
+  }
+  return json_(res);
 }
 
 // iPhone ショートカットからの記録
@@ -64,6 +70,26 @@ function doPost(e) {
   props.setProperty(SHORTCUT_PREFIX + item.id, JSON.stringify(item));
   cleanupShortcuts_(props);
   return json_({ ok: true, item: item });
+}
+
+// ---------- ドライブの明細CSV ----------
+
+// filesSince（ISO日時）より後に更新されたCSVだけを返す。中身はそのままのバイト列（Shift_JIS等）をbase64で
+function listFiles_(folderId, filesSince) {
+  if (!/^[\w-]{10,}$/.test(folderId)) throw new Error('フォルダIDが正しくありません');
+  const folder = DriveApp.getFolderById(folderId);
+  const out = [];
+  const it = folder.getFiles();
+  while (it.hasNext() && out.length < 300) {
+    const f = it.next();
+    const name = f.getName();
+    if (!/\.(csv|tsv|txt)$/i.test(name) || f.isTrashed()) continue;
+    const modified = f.getLastUpdated().toISOString();
+    if (filesSince && modified <= filesSince) continue;
+    if (f.getSize() > 3 * 1024 * 1024) continue;
+    out.push({ id: f.getId(), name: name, modified: modified, b64: Utilities.base64Encode(f.getBlob().getBytes()) });
+  }
+  return out;
 }
 
 // ---------- 収集 ----------

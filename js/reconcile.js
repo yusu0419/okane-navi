@@ -1,5 +1,6 @@
 // 明細CSV（確定データ）と、自動連携で入った速報データの突き合わせ
 import { findNearDup } from './sync.js';
+import { norm } from './util.js';
 
 // 速報（あとで明細CSVで確定させるもの）
 export const PROVISIONAL = new Set(['mail', 'shortcut', 'mf']);
@@ -48,8 +49,17 @@ export function reconcile(stateTx, list) {
   const fresh = [];
   const confirm = [];
   let dup = 0;
+  // 確定済みの明細（別のCSVファイルから取り込んだもの）との重複：同じ口座・日付・金額・お店
+  const pk = (x) => norm(x.payee).slice(0, 6);
+  const pool = stateTx.filter((x) => !isProvisional(x) && !['manual', 'sample'].includes(x.source));
+  const usedPool = new Set();
+  const sameAsConfirmed = (t) => pool.find((x, i) =>
+    !usedPool.has(i) && x.accountId === t.accountId && x.date === t.date && x.amount === t.amount &&
+    pk(x) === pk(t) && (!x._file || x._file !== t._file));
   for (const t of list) {
     if (existing.has(t.extId)) { dup++; continue; }
+    const c = sameAsConfirmed(t);
+    if (c) { usedPool.add(pool.indexOf(c)); dup++; continue; }
     const d = findNearDup(prov, t, used);
     if (d) {
       used.add(d.id);
@@ -57,6 +67,7 @@ export function reconcile(stateTx, list) {
       continue;
     }
     fresh.push(t);
+    pool.push(t);
     existing.add(t.extId);
   }
   // 口座ごとの明細の期間。末尾数日は明細への反映待ちがあるので対象外

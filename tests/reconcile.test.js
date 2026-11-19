@@ -26,3 +26,16 @@ test('CSV confirms provisional, adds new, flags missing', () => {
   // p3 は明細の期間内なのに無い → 要確認。p4 は明細の末尾3日以内なので対象外
   assert.deepEqual(r.review.map((t) => t.id), ['p3']);
 });
+
+test('別々のCSVファイルに同じ取引があっても1件にする（同じファイル内の同額は別の取引）', () => {
+  const existing = [{ id: 'e1', accountId: 'c', date: '2026-10-03', amount: -185, payee: 'Charichari', source: 'csv', extId: 'A1' }];
+  const row = (id, f, extra = {}) => ({ id, accountId: 'c', date: '2026-10-03', amount: -185, payee: 'Charichari', source: 'csv', extId: id, _file: f, ...extra });
+  // 新しいファイルBに同じ取引が2件（1件は既存と同じ、もう1件は同じ日の別の乗車）
+  const r = reconcile(existing, [row('B1', 'B'), row('B2', 'B')]);
+  assert.equal(r.dup, 1);
+  assert.deepEqual(r.fresh.map((t) => t.id), ['B2']);
+  // 同じ一括取り込みの中で、ファイルAとファイルBが同じ期間を含む場合
+  const r2 = reconcile([], [row('A1', 'A'), row('A2', 'A'), row('B1', 'B'), row('B2', 'B'), row('B3', 'B', { payee: 'ローソン' })]);
+  assert.deepEqual(r2.fresh.map((t) => t.id), ['A1', 'A2', 'B3']);
+  assert.equal(r2.dup, 2);
+});

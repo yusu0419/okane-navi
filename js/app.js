@@ -1,6 +1,6 @@
 import { state, load, saveKV, putTx, deleteTx, exportAll, importAll, wipe, defaultPlan } from './db.js';
 import { decode, parseCSV, toCSV } from './csv.js';
-import { isPayPay, parsePayPay, guessMapping, parseGeneric, assignExtIds, findHeaderRow, latestBalances } from './importers.js';
+import { isPayPay, parsePayPay, guessMapping, parseGeneric, assignExtIds, findHeaderRow, latestBalances, fileKey } from './importers.js';
 import { categorize, KINDS, defaultRules } from './rules.js';
 import {
   ACCOUNT_TYPES, isValuationType, balanceAt, balanceYen, toYen, cardUnpaid, netWorth, netWorthHistory,
@@ -9,7 +9,7 @@ import {
 import { donut, incomeExpenseBars, lines, legend } from './charts.js';
 import { toISO as toISODate, uid, yen, man, today, thisMonth, addMonths, ymLabel, esc, norm, sum, groupBy, parseAmount, daysInMonth, pad } from './util.js';
 import { loadSample } from './sample.js';
-import { fetchSync, processSync, guessAccount } from './sync.js';
+import { fetchSync, processSync, guessAccount, folderId } from './sync.js';
 import { reconcile, isProvisional } from './reconcile.js';
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -130,6 +130,8 @@ function viewHome() {
   const alerts = [];
   const sy = state.sync;
   if (sy.lastResult?.error) alerts.push(`<button class="alert warn" data-act="goto-sync">自動連携でエラー：${esc(sy.lastResult.error)} →</button>`);
+  if (sy.pendingFiles?.length) alerts.push(`<button class="alert" data-act="goto-sync">ドライブの明細ファイル <b>${sy.pendingFiles.length}個</b> の口座を選んでください（初回だけ）→</button>`);
+  if (sy.lastResult?.warn) alerts.push(`<button class="alert warn" data-act="goto-sync">${esc(sy.lastResult.warn)} →</button>`);
   if (sy.pending.length) alerts.push(`<button class="alert" data-act="goto-sync">自動連携：口座が決まっていない取引が <b>${sy.pending.length}件</b> あります →</button>`);
   for (const n of sy.notices) alerts.push(`<div class="alert row-between"><button class="link-plain" data-act="notice" data-id="${esc(n.id)}">${esc(n.label)}：${Number(n.date.slice(5, 7))}/${Number(n.date.slice(8))} ${esc(n.text)}。<b>金額を記録 →</b></button><button class="icon-btn" data-act="notice-dismiss" data-id="${esc(n.id)}" aria-label="閉じる">×</button></div>`);
   const rev = state.tx.filter((t) => t.review && !t.excluded).length;
@@ -456,7 +458,8 @@ function previewTable(list) {
   return `<ul class="tx-list preview">${list.slice(0, 6).map((t) => `<li class="tx"><div class="tx-main"><div class="tx-payee">${esc(t.payee || '')}</div><div class="tx-sub">${t.date} <span class="chip">${esc(t.category || '')}</span></div></div><div class="${amountClass(t)}">${yen(t.amount, { sign: true })}</div></li>`).join('')}</ul>`;
 }
 
-async function commitImport(list) {
+// 取り込みの本体（画面を持たない。手動取り込みとドライブからの自動取り込みで共通）
+async function applyImport(list) {
   // 明細の残高列から口座残高を自動で合わせる（銀行・PayPay・現金）
   const bals = latestBalances(list).filter((b) => ['bank', 'paypay', 'cash'].includes(accById(b.accountId)?.type));
   for (const t of list) delete t.balance;
@@ -468,6 +471,7 @@ async function commitImport(list) {
   }
   if (bals.length) await saveKV('snapshots');
   const r = importSummary(list);
+  for (const t of [...r.fresh, ...r.confirm]) delete t._file;
   await putTx([...r.fresh, ...r.confirm, ...r.review]);
   for (const t of list) {
     const a = accById(t.accountId);
@@ -476,6 +480,11 @@ async function commitImport(list) {
     if (!a.confirmedThrough || t.date > a.confirmedThrough) a.confirmedThrough = t.date;
   }
   await saveKV('accounts');
+  return r;
+}
+
+async function commitImport(list) {
+  const r = await applyImport(list);
   const unc = [...r.fresh, ...r.confirm].filter((t) => t.category === '未分類').length;
   closeSheet();
   ui.tab = 'tx';
@@ -575,13 +584,36 @@ function importGenericUI(b, acc, rows, fileName) {
   refresh();
 }
 
+// CSVの中身とファイル名から、どの口座の明細かを判定する
+function analyzeFile(name, bytes) {
+  const rows = parseCSV(decode(bytes));
+  const key = fileKey(name);
+  if (!rows.length) return { name, key, error: '読み込めませんでした' };
+  const pp = isPayPay(rows[findHeaderRow(rows)] || []);
+  const g = pp ? null : guessMapping(rows);
+  const sig = pp ? 'paypay' : g.header.join('|');
+  const headerless = !pp && g.mapping.headerRow < 0;
+  const accs = activeAccounts();
+  const acc = (pp && accs.find((a) => a.type === 'paypay'))
+    || accs.find((a) => a.importNames?.includes(key))
+    || (!headerless && accs.find((a) => a.importMapping?.sig === sig));
+  return { name, key, rows, kind: pp ? 'paypay' : 'generic', sig, accId: acc?.id || '', auto: !!acc };
+}
+
+// 次回から自動で判定できるように、ファイルの種類と形式を口座に覚えさせる
+function rememberFile(acc, e) {
+  if (!acc || !e.key) return;
+  acc.importNames = [...new Set([...(acc.importNames || []), e.key])];
+  if (e.kind === 'generic' && !acc.importMapping && !e.sig.startsWith('列1|')) acc.importMapping = { sig: e.sig, m: guessMapping(e.rows, acc.type).mapping };
+}
+
 function buildImportList(acc, rows, kind, sig) {
   if (kind === 'paypay') {
     // カード払いはカード明細側で取り込むので除外、ポイント払いはPayPay口座の支出として扱う
     const list = parsePayPay(rows).filter((t) => t.bucket !== 'card').map((t) => ({ ...t, accountId: acc.id }));
     return prepare(assignExtIds(list, acc.id), acc);
   }
-  const m = acc.importMapping?.sig === sig ? acc.importMapping.m : guessMapping(rows, acc.type).mapping;
+  const m = acc.importMapping?.sig === sig ? { ...guessMapping(rows, acc.type).mapping, ...acc.importMapping.m } : guessMapping(rows, acc.type).mapping;
   return prepare(assignExtIds(parseGeneric(rows, m), acc.id), acc);
 }
 
@@ -589,16 +621,7 @@ async function batchImportUI(b, files) {
   const body = $('#imp-body', b);
   body.innerHTML = '<div class="notice">読み込み中…</div>';
   const entries = [];
-  for (const f of files) {
-    const rows = parseCSV(decode(await f.arrayBuffer()));
-    if (!rows.length) { entries.push({ name: f.name, error: '読み込めませんでした' }); continue; }
-    const pp = isPayPay(rows[findHeaderRow(rows)] || []);
-    const sig = pp ? 'paypay' : guessMapping(rows).header.join('|');
-    const acc = pp
-      ? activeAccounts().find((a) => a.type === 'paypay')
-      : activeAccounts().find((a) => a.importMapping?.sig === sig);
-    entries.push({ name: f.name, rows, kind: pp ? 'paypay' : 'generic', sig, accId: acc?.id || '', auto: !!acc });
-  }
+  for (const f of files) entries.push(analyzeFile(f.name, await f.arrayBuffer()));
   const accSelect = (e, i) => `<select data-i="${i}"><option value="">（口座を選ぶ）</option><option value="skip" ${e.accId === 'skip' ? 'selected' : ''}>取り込まない</option>${activeAccounts().filter((a) => !isValuationType(a.type) || a.type === 'securities').map((a) => `<option value="${a.id}" ${a.id === e.accId ? 'selected' : ''}>${ACCOUNT_TYPES[a.type].icon} ${esc(a.name)}</option>`).join('')}</select>`;
   const refresh = () => {
     const all = [];
@@ -607,7 +630,7 @@ async function batchImportUI(b, files) {
       let info = '';
       const acc = accById(e.accId);
       if (acc) {
-        e.list = buildImportList(acc, e.rows, e.kind, e.sig);
+        e.list = buildImportList(acc, e.rows, e.kind, e.sig).map((t) => ({ ...t, _file: e.name }));
         all.push(...e.list);
         info = `${e.list.length}行${e.auto ? '・自動判定' : ''}`;
       } else e.list = [];
@@ -620,10 +643,7 @@ async function batchImportUI(b, files) {
       ${summaryHtml(r)}
       <button class="btn primary" id="b-go" ${importCount(r) ? '' : 'disabled'}>${importCount(r)}件を取り込む</button>`;
     $('#b-go', body).onclick = async () => {
-      for (const e of entries) {
-        const acc = accById(e.accId);
-        if (acc && e.kind === 'generic' && acc.importMapping?.sig !== e.sig) acc.importMapping = { sig: e.sig, m: guessMapping(e.rows, acc.type).mapping };
-      }
+      for (const e of entries) rememberFile(accById(e.accId), e);
       await commitImport(all);
     };
   };
@@ -1233,11 +1253,17 @@ async function runSync({ silent = false } = {}) {
     const { add, update } = processSync(state, j.items || []);
     if (add.length || update.length) await putTx([...add, ...update]);
     s.unparsed = (j.unparsed || []).slice(-20);
+    const fr = await importDriveFiles(j.files || []);
     s.lastSync = new Date().toISOString();
-    s.lastResult = { ok: true, added: add.length, at: s.lastSync };
+    s.lastResult = { ok: true, added: add.length, files: fr, at: s.lastSync, warn: j.filesError || null };
     await saveKV('sync');
     if (!$('#sheet').classList.contains('open') && !document.activeElement?.matches('input, select')) render();
-    if (add.length || !silent) toast(`自動連携：${add.length}件を追加しました${s.pending.length ? `（口座未設定 ${s.pending.length}件）` : ''}`);
+    const parts = [];
+    if (add.length) parts.push(`通知から${add.length}件`);
+    if (fr.files) parts.push(`明細ファイル${fr.files}個から新規${fr.fresh}件・確定${fr.confirm}件（重複${fr.dup}件はスキップ）`);
+    if (fr.pending) parts.push(`口座が未設定のファイル${fr.pending}個`);
+    if (j.filesError) parts.push(j.filesError);
+    if (parts.length || !silent) toast(`自動連携：${parts.join('、') || '新しい取引はありません'}`);
   } catch (err) {
     s.lastResult = { error: err.message, at: new Date().toISOString() };
     await saveKV('sync');
@@ -1246,6 +1272,46 @@ async function runSync({ silent = false } = {}) {
   } finally {
     syncing = false;
   }
+}
+
+const b64bytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+// ドライブのフォルダから届いた明細ファイルを取り込む。口座が分からないものは保留
+async function importDriveFiles(files) {
+  const s = state.sync;
+  const queue = [...s.pendingFiles, ...files.filter((f) => s.files[f.id] !== f.modified)];
+  for (const f of files) if (!s.filesSince || f.modified > s.filesSince) s.filesSince = f.modified;
+  const seen = new Set();
+  const list = [];
+  const pending = [];
+  let used = 0;
+  for (const f of queue) {
+    if (seen.has(f.id)) continue;
+    seen.add(f.id);
+    const e = analyzeFile(f.name, b64bytes(f.b64));
+    if (e.error) { s.files[f.id] = f.modified; continue; }
+    if (s.skipKeys.includes(e.key)) { s.files[f.id] = f.modified; continue; }
+    const acc = accById(e.accId);
+    if (!acc) { pending.push({ id: f.id, name: f.name, modified: f.modified, b64: f.b64, key: e.key }); continue; }
+    rememberFile(acc, e);
+    list.push(...buildImportList(acc, e.rows, e.kind, e.sig).map((t) => ({ ...t, _file: f.name })));
+    s.files[f.id] = f.modified;
+    used++;
+  }
+  s.pendingFiles = pending;
+  if (!list.length) return { files: used, fresh: 0, confirm: 0, dup: 0, pending: pending.length };
+  const r = await applyImport(list);
+  return { files: used, fresh: r.fresh.length, confirm: r.confirm.length, dup: r.dup, pending: pending.length };
+}
+
+function pendingFilesHtml() {
+  const s = state.sync;
+  if (!s.pendingFiles.length) return '';
+  const groups = groupBy(s.pendingFiles, (f) => f.key);
+  const opts = '<option value="">（口座を選ぶ）</option><option value="skip">取り込まない</option>' +
+    activeAccounts().filter((a) => !isValuationType(a.type) || a.type === 'securities').map((a) => `<option value="${a.id}">${ACCOUNT_TYPES[a.type].icon} ${esc(a.name)}</option>`).join('');
+  return `<div class="notice warn">ドライブの明細ファイルのうち、どの口座のものか分からないものがあります。初回だけ選んでください（同じ種類のファイルは次から自動で取り込みます）。</div>
+    <form class="form" id="sy-files">${[...groups.entries()].map(([key, fs]) => `<label>${esc(fs[0].name)}${fs.length > 1 ? ` ほか${fs.length - 1}個` : ''}<select data-key="${esc(key)}">${opts}</select></label>`).join('')}</form>`;
 }
 
 function syncSection() {
@@ -1264,11 +1330,14 @@ function syncSection() {
     <form class="form" id="syncf">
       <label>連携URL<input id="sy-url" value="${esc(s.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" autocapitalize="off"></label>
       <label>合言葉<input id="sy-token" value="${esc(s.token)}" autocomplete="off" autocapitalize="off"></label>
+      <label>明細CSVのGoogleドライブフォルダ（任意）<input id="sy-folder" value="${esc(s.folder)}" placeholder="https://drive.google.com/drive/folders/…" autocomplete="off" autocapitalize="off"><small>このフォルダに置いたCSVを自動で取り込みます。同じ取引は何度置いても1件だけになります。</small></label>
       <button class="btn primary">保存して同期</button>
     </form>
     ${keys.length ? `<div class="label">通知と口座の対応</div>
       <form class="form" id="sy-map">${keys.map(([k, v]) => `<label>${esc(v.label)}<select data-key="${esc(k)}">${accOpts(s.map[k], v.source)}</select></label>`).join('')}</form>` : ''}
     ${s.pending.length ? `<div class="notice warn">口座が決まっていない取引が ${s.pending.length}件 あります。上で口座を選ぶと取り込まれます。</div>` : ''}
+    ${pendingFilesHtml()}
+    ${s.folder ? `<div class="muted">ドライブから取り込んだファイル：${Object.keys(s.files).length}個</div>` : ''}
     ${s.unparsed.length ? `<details class="help"><summary>読み取れなかったメール（${s.unparsed.length}件）</summary><ul class="simple">${s.unparsed.map((u) => `<li><span>${esc(u.date)} ${esc(u.subject)}</span></li>`).join('')}</ul></details>` : ''}
     <details class="help"><summary>① Gmail連携の設定方法（最初に1回・約5分）</summary>
       <ol class="steps">
@@ -1285,6 +1354,7 @@ function syncSection() {
       ・三井住友銀行の振込入金メールには金額が書かれていないため、ホームに「金額を記録」のお知らせを出します。<br>
       ・携帯料金・公共料金など毎月の自動払いは、カード会社が通知メールを送らないことがあります。月1回カード明細CSVを取り込むと確実です（重複は自動でスキップ）。<br>
       ・セゾン・PayPay・ゆうちょ・SBIは利用ごとのメールが届かないため、CSV取り込みかショートカットを使ってください。</p>
+      <p><b>ドライブの明細フォルダを使う場合</b>：スクリプトを最新版に貼り替えて保存 → もう一度 <b>setup</b> を実行してドライブへのアクセスを「許可」→「デプロイを管理」→ 編集 → バージョン「新バージョン」でデプロイ（URLは変わりません）。その後、上の「明細CSVのGoogleドライブフォルダ」にフォルダのURLを貼り付けます。</p>
       <p>合言葉を知っている人だけが連携URLから明細を読めます。合言葉は人に教えないでください。</p>
     </details>
     <details class="help"><summary>② Apple Payの支払いを自動記録（iPhoneのショートカット）</summary>
@@ -1312,12 +1382,29 @@ function mountSync(v) {
     e.preventDefault();
     s.url = $('#sy-url', v).value.trim();
     s.token = $('#sy-token', v).value.trim();
+    s.folder = $('#sy-folder', v).value.trim();
+    if (s.folder && !folderId(s.folder)) return toast('ドライブのフォルダのURLを確認してください');
     if (!/^https:\/\//.test(s.url)) return toast('連携URLを入力してください');
     if (!s.token) return toast('合言葉を入力してください');
     await saveKV('sync');
     await runSync();
     render();
   };
+  $('#sy-files', v)?.addEventListener('change', async (e) => {
+    const key = e.target.dataset.key;
+    const val = e.target.value;
+    if (!key || !val) return;
+    if (val === 'skip') state.sync.skipKeys = [...new Set([...state.sync.skipKeys, key])];
+    else {
+      const acc = accById(val);
+      acc.importNames = [...new Set([...(acc.importNames || []), key])];
+      await saveKV('accounts');
+    }
+    const fr = await importDriveFiles([]);
+    await saveKV('sync');
+    render();
+    toast(`新規${fr.fresh}件・確定${fr.confirm}件を取り込みました${fr.dup ? `（重複${fr.dup}件はスキップ）` : ''}`);
+  });
   $('#sy-map', v)?.addEventListener('change', async (e) => {
     const k = e.target.dataset.key;
     if (!k) return;
